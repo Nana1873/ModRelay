@@ -24,6 +24,27 @@ public sealed class ArchiveUiTests
     }
 
     [Fact]
+    public void Selection_ContextMenuCanSelectNoneAndAll()
+    {
+        var entries = new[]
+        {
+            new ArchiveEntryInfo("first.pmp", "first.pmp", 10, false),
+            new ArchiveEntryInfo("second.pmp", "second.pmp", 20, false)
+        };
+
+        using var form = new ArchiveSelectionForm("bundle.zip", entries, darkMode: true);
+        var list = Assert.Single(FindControls<CheckedListBox>(form));
+        var menu = Assert.IsType<ContextMenuStrip>(list.ContextMenuStrip);
+        Assert.Equal(new[] { "Select all", "Select none" }, menu.Items.Cast<ToolStripItem>().Select(item => item.Text));
+
+        menu.Items[1].PerformClick();
+        Assert.Empty(list.CheckedIndices.Cast<int>());
+
+        menu.Items[0].PerformClick();
+        Assert.Equal(entries.Length, list.CheckedIndices.Count);
+    }
+
+    [Fact]
     public void Progress_IsTopmostWithoutTakingFocus()
     {
         using var form = new ArchiveProgressForm("bundle.zip", "Scanning…", darkMode: true);

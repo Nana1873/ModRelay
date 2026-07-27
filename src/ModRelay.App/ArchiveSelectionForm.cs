@@ -61,6 +61,13 @@ internal sealed class ArchiveSelectionForm : SmoothDpiForm
         _entries.Dock = DockStyle.Fill;
         _entries.CheckOnClick = true;
         _entries.BorderStyle = BorderStyle.FixedSingle;
+        var selectionMenu = new ContextMenuStrip { Font = UiTheme.Font() };
+        var selectAll = selectionMenu.Items.Add("Select all");
+        selectAll.Click += (_, _) => SetAllEntriesChecked(true);
+        var selectNone = selectionMenu.Items.Add("Select none");
+        selectNone.Click += (_, _) => SetAllEntriesChecked(false);
+        UiTheme.Apply(selectionMenu, darkMode);
+        _entries.ContextMenuStrip = selectionMenu;
         for (var i = 0; i < entries.Count; i++)
         {
             var entry = entries[i];
@@ -96,4 +103,10 @@ internal sealed class ArchiveSelectionForm : SmoothDpiForm
         .Cast<int>()
         .Select(index => _models[index].Key)
         .ToList();
+
+    private void SetAllEntriesChecked(bool isChecked)
+    {
+        for (var i = 0; i < _entries.Items.Count; i++)
+            _entries.SetItemChecked(i, isChecked);
+    }
 }

@@ -48,12 +48,13 @@ internal sealed class SettingsForm : SmoothDpiForm
         Icon = AppIcon.Current;
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1 };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.Controls.Add(BuildHeader());
-        root.Controls.Add(BuildUpdateBanner());
-        root.Controls.Add(BuildContent());
+        root.Controls.Add(BuildHeader(), 0, 0);
+        root.Controls.Add(BuildUpdateBanner(), 0, 1);
+        root.Controls.Add(BuildContent(), 0, 2);
         Controls.Add(root);
 
         LoadConfig(config);
