@@ -12,6 +12,8 @@ public sealed class SettingsLayoutTests
     {
         using var temp = new TestDirectory();
         using var form = new SettingsForm(new AppConfig { WatchFolders = [temp.Path] });
+        form.Show();
+        Application.DoEvents();
         Assert.Equal(UiTheme.DarkBackground, form.BackColor);
         Assert.True(form.ClientSize.Width <= 720);
         Assert.True(form.ClientSize.Height <= 540);
@@ -33,9 +35,34 @@ public sealed class SettingsLayoutTests
         Assert.Same(folderLayout, folderButtons.Parent);
         Assert.Equal(0, folderLayout.GetRow(folderList));
         Assert.Equal(1, folderLayout.GetRow(folderButtons));
+        AssertCardsContainContent(form, "before scaling");
 
         form.Scale(new SizeF(1.5f, 1.5f));
+        form.PerformLayout();
         Assert.DoesNotContain(FindControls<ScrollableControl>(form), control => control.AutoScroll);
+        AssertCardsContainContent(form, "after 150% scaling");
+    }
+
+    private static void AssertCardsContainContent(SettingsForm form, string phase)
+    {
+        var cards = FindControls<Panel>(form)
+            .Where(panel => panel.Visible && panel.Tag is TableLayoutPanel)
+            .ToList();
+        Assert.Equal(2, cards.Count);
+        var page = Assert.IsType<Panel>(cards[0].Parent?.Parent);
+        var contentBottom = cards.Max(card => card.Bottom);
+        Assert.True(
+            page.ClientSize.Height >= contentBottom,
+            $"Visible page {phase} was {page.ClientSize.Height}px high but its cards need {contentBottom}px.");
+        Assert.All(
+            cards,
+            card =>
+            {
+                var content = Assert.IsType<TableLayoutPanel>(card.Tag);
+                Assert.True(
+                    card.ClientSize.Height >= content.Bottom + card.Padding.Bottom,
+                    $"Card {phase} was {card.ClientSize.Height}px high but its content needs {content.Bottom + card.Padding.Bottom}px.");
+            });
     }
 
     [Fact]

@@ -6,7 +6,7 @@ namespace ModRelay.Tests;
 public sealed class ArchiveUiTests
 {
     [Fact]
-    public void Selection_IsForegroundAndLabelsPreDtVersusUnknown()
+    public void Selection_IsForegroundAndOnlyLabelsLikelyPreDtEntries()
     {
         var entries = new[]
         {
@@ -18,9 +18,30 @@ public sealed class ArchiveUiTests
         var list = Assert.Single(FindControls<CheckedListBox>(form));
 
         Assert.True(form.TopMost);
-        Assert.Contains("[PRE-DT]", list.Items[0]!.ToString());
-        Assert.Contains("[DT / UNKNOWN]", list.Items[1]!.ToString());
+        Assert.StartsWith("[PRE-DT?]", list.Items[0]!.ToString());
+        Assert.Equal("Outfit.pmp", list.Items[1]!.ToString());
         Assert.Contains(FindControls<Label>(form), label => label.Text.Contains("inferred", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Selection_ContextMenuCanSelectNoneAndAll()
+    {
+        var entries = new[]
+        {
+            new ArchiveEntryInfo("first.pmp", "first.pmp", 10, false),
+            new ArchiveEntryInfo("second.pmp", "second.pmp", 20, false)
+        };
+
+        using var form = new ArchiveSelectionForm("bundle.zip", entries, darkMode: true);
+        var list = Assert.Single(FindControls<CheckedListBox>(form));
+        var menu = Assert.IsType<ContextMenuStrip>(list.ContextMenuStrip);
+        Assert.Equal(new[] { "Select all", "Select none" }, menu.Items.Cast<ToolStripItem>().Select(item => item.Text));
+
+        menu.Items[1].PerformClick();
+        Assert.Empty(list.CheckedIndices.Cast<int>());
+
+        menu.Items[0].PerformClick();
+        Assert.Equal(entries.Length, list.CheckedIndices.Count);
     }
 
     [Fact]

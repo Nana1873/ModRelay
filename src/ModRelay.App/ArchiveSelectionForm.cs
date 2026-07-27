@@ -52,7 +52,7 @@ internal sealed class ArchiveSelectionForm : SmoothDpiForm
         });
         root.Controls.Add(new Label
         {
-            Text = "Pre-DT is inferred from the package name. DT / unknown means no legacy marker was found.",
+            Text = "Pre-DT markers are inferred from package names.",
             AutoSize = true,
             ForeColor = UiTheme.Muted,
             Margin = new Padding(0, 0, 0, 14)
@@ -61,11 +61,18 @@ internal sealed class ArchiveSelectionForm : SmoothDpiForm
         _entries.Dock = DockStyle.Fill;
         _entries.CheckOnClick = true;
         _entries.BorderStyle = BorderStyle.FixedSingle;
+        var selectionMenu = new ContextMenuStrip { Font = UiTheme.Font() };
+        var selectAll = selectionMenu.Items.Add("Select all");
+        selectAll.Click += (_, _) => SetAllEntriesChecked(true);
+        var selectNone = selectionMenu.Items.Add("Select none");
+        selectNone.Click += (_, _) => SetAllEntriesChecked(false);
+        UiTheme.Apply(selectionMenu, darkMode);
+        _entries.ContextMenuStrip = selectionMenu;
         for (var i = 0; i < entries.Count; i++)
         {
             var entry = entries[i];
-            var generation = entry.LooksPreDawntrail ? "PRE-DT" : "DT / UNKNOWN";
-            _entries.Items.Add($"[{generation}]  {entry.FileName}", true);
+            var marker = entry.LooksPreDawntrail ? "[PRE-DT?]  " : string.Empty;
+            _entries.Items.Add($"{marker}{entry.FileName}", true);
         }
         root.Controls.Add(_entries);
 
@@ -96,4 +103,10 @@ internal sealed class ArchiveSelectionForm : SmoothDpiForm
         .Cast<int>()
         .Select(index => _models[index].Key)
         .ToList();
+
+    private void SetAllEntriesChecked(bool isChecked)
+    {
+        for (var i = 0; i < _entries.Items.Count; i++)
+            _entries.SetItemChecked(i, isChecked);
+    }
 }
