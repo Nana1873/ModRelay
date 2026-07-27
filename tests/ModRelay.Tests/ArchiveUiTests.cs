@@ -6,7 +6,7 @@ namespace ModRelay.Tests;
 public sealed class ArchiveUiTests
 {
     [Fact]
-    public void Selection_IsForegroundAndLabelsPreDtVersusUnknown()
+    public void Selection_IsForegroundAndOnlyLabelsLikelyPreDtEntries()
     {
         var entries = new[]
         {
@@ -18,8 +18,8 @@ public sealed class ArchiveUiTests
         var list = Assert.Single(FindControls<CheckedListBox>(form));
 
         Assert.True(form.TopMost);
-        Assert.Contains("[PRE-DT]", list.Items[0]!.ToString());
-        Assert.Contains("[DT / UNKNOWN]", list.Items[1]!.ToString());
+        Assert.StartsWith("[PRE-DT?]", list.Items[0]!.ToString());
+        Assert.Equal("Outfit.pmp", list.Items[1]!.ToString());
         Assert.Contains(FindControls<Label>(form), label => label.Text.Contains("inferred", StringComparison.OrdinalIgnoreCase));
     }
 
