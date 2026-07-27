@@ -1,0 +1,41 @@
+# Build output
+bin/
+obj/
+artifacts/
+publish/
+
+# User and IDE files
+*.user
+*.suo
+.vs/
+.vscode/
+.idea/
+.claude/
+
+# Test output
+TestResults/
+coverage/
+*.trx
+
+# Local application data and logs
+*.log
+config.json
+settings.json
+settings.json.*
+pending.json
+data/
+ModRelay-*-win-x64.zip*
+
+# Downloaded mod packages must never be committed accidentally
+*.ttmp
+*.ttmp2
+*.pmp
+*.pcp
+*.zip
+*.7z
+*.rar
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
