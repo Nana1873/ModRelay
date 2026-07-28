@@ -21,7 +21,6 @@ internal sealed class SettingsForm : SmoothDpiForm
 
     private readonly ListBox _watchFolders = new();
     private readonly TextBox _texToolsPath = new();
-    private readonly NumericUpDown _penumbraPort = new();
     private readonly Label _texToolsStatus = new();
     private readonly System.Windows.Forms.Timer _saveTimer = new() { Interval = 350 };
     private readonly List<(Button Button, Control Page)> _pages = [];
@@ -70,7 +69,7 @@ internal sealed class SettingsForm : SmoothDpiForm
     public void ShowAvailableUpdate(Version version, string releaseUrl)
     {
         _updateUrl = releaseUrl;
-        _updateText.Text = $"ModRelay {version.ToString(3)} is available.";
+        _updateText.Text = $"ModRelay {AppVersion.Format(version)} is available. Current: {AppVersion.Current}.";
         _updateBanner.Visible = true;
     }
 
@@ -129,7 +128,7 @@ internal sealed class SettingsForm : SmoothDpiForm
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.Controls.Add(new Label
         {
-            Text = "ModRelay",
+            Text = $"ModRelay {AppVersion.Current}",
             ForeColor = Color.White,
             Font = UiTheme.Font(15, FontStyle.Bold),
             AutoSize = true,
@@ -317,17 +316,9 @@ internal sealed class SettingsForm : SmoothDpiForm
 
     private Control BuildPenumbraCard()
     {
-        var card = CardWithTitle("Penumbra", "Enable its HTTP API under Settings → Advanced. ModRelay uses Penumbra's own importer.");
-        var layout = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 2, Padding = new Padding(0, 6, 0, 0) };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.Controls.Add(LabelFor("API port"), 0, 0);
-        _penumbraPort.Minimum = 1;
-        _penumbraPort.Maximum = 65535;
-        _penumbraPort.Width = 110;
-        layout.Controls.Add(_penumbraPort, 1, 0);
-        AddCardBody(card, layout);
-        return card;
+        return CardWithTitle(
+            "Penumbra",
+            "Enable its HTTP API under Settings → Advanced. ModRelay uses Penumbra's official localhost:42069 endpoint.");
     }
 
     private Control BuildAdvancedCard()
@@ -377,7 +368,6 @@ internal sealed class SettingsForm : SmoothDpiForm
         _darkMode.Checked = config.DarkMode;
         _autoCheckUpdates.Checked = config.AutoCheckForUpdates;
         _texToolsPath.Text = config.TexToolsConsolePath;
-        _penumbraPort.Value = Math.Clamp(config.PenumbraPort, 1, 65535);
         foreach (var folder in config.WatchFolders)
             _watchFolders.Items.Add(folder);
     }
@@ -394,7 +384,6 @@ internal sealed class SettingsForm : SmoothDpiForm
             toggle.CheckedChanged += (_, _) => SaveNow();
 
         _texToolsPath.TextChanged += (_, _) => QueueSave();
-        _penumbraPort.ValueChanged += (_, _) => SaveNow();
     }
 
     private void QueueSave()
@@ -426,7 +415,6 @@ internal sealed class SettingsForm : SmoothDpiForm
         ResultConfig.AutoCheckForUpdates = _autoCheckUpdates.Checked;
         ResultConfig.WatchFolders = folders;
         ResultConfig.TexToolsConsolePath = _texToolsPath.Text.Trim();
-        ResultConfig.PenumbraPort = (int)_penumbraPort.Value;
         ConfigChanged?.Invoke(ResultConfig.Clone());
     }
 

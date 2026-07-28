@@ -17,9 +17,23 @@ public sealed class PendingQueueTests
         first.Add(mod.ToUpperInvariant());
 
         var second = new PendingQueue(storage);
-        second.Load();
+        Assert.True(second.Load());
 
         Assert.Equal(1, second.Count);
         Assert.Equal(mod, second.Snapshot().Single(), ignoreCase: true);
+    }
+
+    [Fact]
+    public void CorruptQueue_IsReportedAndBackedUp()
+    {
+        using var temp = new TestDirectory();
+        var storage = temp.File("pending.json");
+        File.WriteAllText(storage, "{not json");
+
+        var queue = new PendingQueue(storage);
+
+        Assert.False(queue.Load());
+        Assert.True(File.Exists(storage + ".broken"));
+        Assert.Equal(0, queue.Count);
     }
 }

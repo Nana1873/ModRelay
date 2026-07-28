@@ -86,9 +86,6 @@ public sealed class ConfigStore(string configFilePath)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        if (config.PenumbraPort <= 0)
-            config.PenumbraPort = 42069;
-
         if (config.PenumbraTimeoutSeconds <= 0)
             config.PenumbraTimeoutSeconds = 60;
 

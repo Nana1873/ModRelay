@@ -12,6 +12,8 @@ public sealed class DownloadWatcher : IDisposable
     private readonly List<FileSystemWatcher> _watchers = [];
     private readonly ConcurrentDictionary<string, long> _pending = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _ignored = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, FileFingerprint> _processed = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTime> _watchStarted = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new();
 
     private Timer? _poller;
@@ -45,16 +47,18 @@ public sealed class DownloadWatcher : IDisposable
 
                 try
                 {
+                    _watchStarted[folder] = DateTime.UtcNow;
                     var watcher = new FileSystemWatcher(folder)
                     {
                         IncludeSubdirectories = false,
-                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.Size | NotifyFilters.LastWrite
+                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.Size | NotifyFilters.LastWrite,
+                        InternalBufferSize = 64 * 1024
                     };
 
                     watcher.Created += OnChanged;
                     watcher.Changed += OnChanged;
                     watcher.Renamed += OnRenamed;
-                    watcher.Error += (_, e) => Log.Warn($"Watcher error in {folder}.", e.GetException());
+                    watcher.Error += (_, e) => RecoverAfterWatcherError(folder, e.GetException());
                     watcher.EnableRaisingEvents = true;
 
                     _watchers.Add(watcher);
@@ -86,6 +90,7 @@ public sealed class DownloadWatcher : IDisposable
 
             _watchers.Clear();
             _pending.Clear();
+            _watchStarted.Clear();
         }
     }
 
@@ -134,6 +139,14 @@ public sealed class DownloadWatcher : IDisposable
             if (!_pending.TryRemove(path, out _))
                 continue;
 
+            if (!TryGetFingerprint(path, out var fingerprint))
+                continue;
+
+            if (_processed.TryGetValue(path, out var previous) && previous == fingerprint)
+                continue;
+
+            _processed[path] = fingerprint;
+
             Log.Info($"Detected {path}");
 
             try
@@ -142,8 +155,47 @@ public sealed class DownloadWatcher : IDisposable
             }
             catch (Exception ex)
             {
+                _processed.TryRemove(path, out _);
                 Log.Error($"Handler for {path} threw.", ex);
             }
+        }
+    }
+
+    private void RecoverAfterWatcherError(string folder, Exception? exception)
+    {
+        Log.Warn($"Watcher error in {folder}; rescanning files changed since watching began.", exception);
+        if (!_watchStarted.TryGetValue(folder, out var started))
+            return;
+
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(folder))
+            {
+                if (!IsInteresting(path) || IsIgnored(path))
+                    continue;
+
+                if (File.GetLastWriteTimeUtc(path) >= started)
+                    _pending.TryAdd(path, -1);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"Could not recover the watcher for {folder}.", ex);
+        }
+    }
+
+    private static bool TryGetFingerprint(string path, out FileFingerprint fingerprint)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            fingerprint = new FileFingerprint(info.Length, info.LastWriteTimeUtc);
+            return info.Exists;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            fingerprint = default;
+            return false;
         }
     }
 
@@ -160,4 +212,6 @@ public sealed class DownloadWatcher : IDisposable
     }
 
     public void Dispose() => Stop();
+
+    private readonly record struct FileFingerprint(long Length, DateTime LastWriteUtc);
 }

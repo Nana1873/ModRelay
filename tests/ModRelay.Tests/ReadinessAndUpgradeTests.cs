@@ -32,6 +32,22 @@ public sealed class ReadinessAndUpgradeTests
         Assert.Null(result.OutputPath);
     }
 
+    [Fact]
+    public async Task TexTools_ExistingTarget_IsNeverReusedOrDeleted()
+    {
+        using var temp = new TestDirectory();
+        var source = temp.File("Outfit (EW).ttmp2");
+        var target = temp.File("Outfit (EW)_dt.ttmp2");
+        File.WriteAllText(source, "source");
+        File.WriteAllText(target, "existing output");
+        var commandInterpreter = Environment.GetEnvironmentVariable("ComSpec")!;
+
+        var result = await new TexToolsUpgrader().UpgradeAsync(commandInterpreter, source, target);
+
+        Assert.Equal(UpgradeStatus.Failed, result.Status);
+        Assert.Equal("existing output", File.ReadAllText(target));
+    }
+
     [Theory]
     [InlineData("Outfit Pre-DT.ttmp2")]
     [InlineData("Outfit Endwalker.pmp")]

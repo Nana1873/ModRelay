@@ -14,12 +14,12 @@ public sealed class PenumbraClientTests
         File.WriteAllText(package, "package");
         var handler = new PenumbraHandler();
         using var http = new HttpClient(handler);
-        var config = new AppConfig { PenumbraPort = 42069, PenumbraTimeoutSeconds = 2 };
+        var config = new AppConfig { PenumbraTimeoutSeconds = 2 };
         var client = new PenumbraClient(http, () => config);
 
         var result = await client.InstallAsync(package);
 
-        Assert.Equal(InstallOutcome.Imported, result.Outcome);
+        Assert.Equal(InstallOutcome.Accepted, result.Outcome);
         Assert.Equal("/api/installmod", handler.PostedUri?.AbsolutePath);
         Assert.Contains("\"Path\":", handler.PostedBody);
         Assert.DoesNotContain("\"path\":", handler.PostedBody);
@@ -28,10 +28,26 @@ public sealed class PenumbraClientTests
     }
 
     [Fact]
+    public async Task UnrelatedModAddition_DoesNotClaimSubmittedPackageWasImported()
+    {
+        using var temp = new TestDirectory();
+        var package = temp.File("submitted.pmp");
+        File.WriteAllText(package, "package");
+        var handler = new PenumbraHandler();
+        using var http = new HttpClient(handler);
+        var client = new PenumbraClient(http, () => new AppConfig());
+
+        var result = await client.InstallAsync(package);
+
+        Assert.Equal(InstallOutcome.Accepted, result.Outcome);
+        Assert.Equal("submitted", result.ModName);
+    }
+
+    [Fact]
     public async Task MalformedPenumbraResponse_IsTreatedAsUnavailableInsteadOfCrashing()
     {
         using var http = new HttpClient(new StaticHandler("not json"));
-        var config = new AppConfig { PenumbraPort = 42069 };
+        var config = new AppConfig();
         var client = new PenumbraClient(http, () => config);
 
         var reachable = await client.IsReachableAsync();

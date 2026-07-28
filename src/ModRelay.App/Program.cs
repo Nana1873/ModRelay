@@ -13,20 +13,20 @@ static class Program
     [STAThread]
     static void Main()
     {
-        var files = Environment.GetCommandLineArgs()
-            .Skip(1)
-            .Select(Path.GetFullPath)
-            .Where(File.Exists)
-            .ToArray();
+        ApplicationConfiguration.Initialize();
+        var files = CollectFiles(Environment.GetCommandLineArgs().Skip(1));
 
         using var mutex = new Mutex(initiallyOwned: true, MutexName, out var isFirstInstance);
         if (!isFirstInstance)
         {
-            ForwardToRunningInstance(files);
+            if (!ForwardToRunningInstance(files))
+                MessageBox.Show(
+                    "The running ModRelay instance did not accept the request. Please open it from the notification area and try again.",
+                    AppPaths.AppName,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
             return;
         }
-
-        ApplicationConfiguration.Initialize();
 
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             Log.Error("Unhandled application error.", e.ExceptionObject as Exception);
@@ -40,7 +40,27 @@ static class Program
         Application.Run(new TrayApp(PipeName, files));
     }
 
-    private static void ForwardToRunningInstance(IEnumerable<string> files)
+    private static string[] CollectFiles(IEnumerable<string> arguments)
+    {
+        var files = new List<string>();
+        foreach (var argument in arguments)
+        {
+            try
+            {
+                var path = Path.GetFullPath(argument);
+                if (File.Exists(path))
+                    files.Add(path);
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                // Ignore malformed shell arguments instead of preventing the tray app from starting.
+            }
+        }
+
+        return [.. files];
+    }
+
+    private static bool ForwardToRunningInstance(IEnumerable<string> files)
     {
         var paths = files.ToArray();
         for (var attempt = 0; attempt < 3; attempt++)
@@ -57,7 +77,7 @@ static class Program
                     foreach (var file in paths)
                         writer.WriteLine(file);
 
-                return;
+                return true;
             }
             catch when (attempt < 2)
             {
@@ -65,8 +85,10 @@ static class Program
             }
             catch
             {
-                return;
+                return false;
             }
         }
+
+        return false;
     }
 }

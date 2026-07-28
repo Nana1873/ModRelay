@@ -25,6 +25,7 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
 
     private AppConfig _config;
     private bool _exiting;
+    private bool _setupPending;
     private SettingsForm? _settingsForm;
     private ArchiveProgressForm? _archiveProgressForm;
     private int _updateCheckRunning;
@@ -36,6 +37,7 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
         _pipeName = pipeName;
         _configStore = new ConfigStore();
         var firstRun = !File.Exists(_configStore.FilePath);
+        _setupPending = firstRun;
 
         Log.Init(AppPaths.LogDirectory);
         _config = _configStore.Load();
@@ -111,7 +113,10 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
 
         _watcher.FileReady += _pipeline.Enqueue;
         _pipeline.Start();
-        RestartWatcher();
+        if (firstRun)
+            Status("Complete setup to start watching");
+        else
+            RestartWatcher();
 
         foreach (var file in initialFiles)
             SubmitExternalFile(file);
@@ -158,7 +163,14 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
                     _settingsForm = null;
                 form.Dispose();
                 if (!_exiting)
+                {
+                    if (_setupPending)
+                    {
+                        _setupPending = false;
+                        RestartWatcher();
+                    }
                     _ = ShowMinimizedNotificationAsync();
+                }
             };
             WindowActivation.ShowAndActivate(form);
             Log.Info("Settings window shown.");
@@ -167,9 +179,12 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
 
     private void ApplySettings(AppConfig updated)
     {
+        var previous = _config;
+        var startupApplied = false;
+        var associationsApplied = false;
+        var settingsCommitted = false;
         try
         {
-            var previous = _config;
             var startupChanged = previous.RunOnStartup != updated.RunOnStartup;
             var associationsChanged = previous.AssociateFileTypes != updated.AssociateFileTypes;
             var foldersChanged = !SameFolders(previous.WatchFolders, updated.WatchFolders);
@@ -180,14 +195,21 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
                 var executable = Environment.ProcessPath
                     ?? throw new InvalidOperationException("The application path could not be determined.");
                 if (startupChanged)
+                {
+                    startupApplied = true;
                     StartupRegistration.SetEnabled(updated.RunOnStartup, executable);
+                }
                 if (associationsChanged)
+                {
+                    associationsApplied = true;
                     FileAssociationRegistration.SetEnabled(updated.AssociateFileTypes, executable);
+                }
             }
 
+            _configStore.Save(updated);
             _config = updated;
-            _configStore.Save(_config);
-            if (foldersChanged)
+            settingsCommitted = true;
+            if (foldersChanged && !_setupPending)
                 RestartWatcher();
             UiTheme.Apply(_trayMenu, _config.DarkMode);
             Status("Settings saved automatically");
@@ -197,8 +219,31 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
         }
         catch (Exception ex)
         {
+            if (!settingsCommitted)
+                TryRestoreRegistrations(previous, startupApplied, associationsApplied);
             Log.Error("The settings could not be saved completely.", ex);
             Notify("Settings could not be saved", ex.Message, isError: true);
+        }
+    }
+
+    private static void TryRestoreRegistrations(
+        AppConfig previous,
+        bool restoreStartup,
+        bool restoreAssociations)
+    {
+        try
+        {
+            var executable = Environment.ProcessPath;
+            if (executable is null)
+                return;
+            if (restoreAssociations)
+                FileAssociationRegistration.SetEnabled(previous.AssociateFileTypes, executable);
+            if (restoreStartup)
+                StartupRegistration.SetEnabled(previous.RunOnStartup, executable);
+        }
+        catch (Exception rollbackError)
+        {
+            Log.Error("Could not roll back a partial Windows registration change.", rollbackError);
         }
     }
 
@@ -288,20 +333,22 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
             switch (result.Status)
             {
                 case UpdateStatus.Available:
-                    _pendingUpdateUrl = result.ReleaseUrl;
-                    _pendingUpdateVersion = result.LatestVersion;
+                    var latestVersion = result.LatestVersion!;
+                    var releaseUrl = result.ReleaseUrl!;
+                    _pendingUpdateUrl = releaseUrl;
+                    _pendingUpdateVersion = latestVersion;
                     OnUi(() =>
                     {
-                        _updateAvailableItem.Text = $"Update {result.LatestVersion!.ToString(3)} available…";
+                        _updateAvailableItem.Text = $"Update {AppVersion.Format(latestVersion)} available…";
                         _updateAvailableItem.Visible = true;
-                        _settingsForm?.ShowAvailableUpdate(result.LatestVersion, result.ReleaseUrl!);
+                        _settingsForm?.ShowAvailableUpdate(latestVersion, releaseUrl);
                     });
                     break;
 
                 case UpdateStatus.Current:
                     ClearAvailableUpdate();
                     if (!silent)
-                        Notify("ModRelay is up to date", $"You are using version {result.CurrentVersion.ToString(3)}.");
+                        Notify("ModRelay is up to date", $"You are using {AppVersion.Format(result.CurrentVersion)}.");
                     break;
 
                 case UpdateStatus.Unavailable when !silent:
@@ -515,11 +562,13 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
         _archiveProgressForm?.Close();
         _watcher.Dispose();
         _pipeline.Dispose();
+        _penumbra.Dispose();
         _httpClient.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
         _trayMenu.Dispose();
         _dispatcher.Dispose();
+        _shutdown.Dispose();
         ExitThread();
     }
 

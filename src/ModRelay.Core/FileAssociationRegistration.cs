@@ -7,6 +7,7 @@ namespace ModRelay.Core;
 public static class FileAssociationRegistration
 {
     private const string ProgId = "ModRelay.Mod";
+    private const string PreviousAssociationPrefix = "PreviousAssociation:";
     private static readonly string[] Extensions = [".ttmp", ".ttmp2", ".pmp", ".pcp"];
 
     public static void SetEnabled(bool enabled, string executablePath)
@@ -27,6 +28,12 @@ public static class FileAssociationRegistration
             foreach (var extension in Extensions)
             {
                 using var key = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{extension}", writable: true);
+                var current = key?.GetValue(string.Empty)?.ToString();
+                if (!string.Equals(current, ProgId, StringComparison.Ordinal))
+                {
+                    using var progId = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{ProgId}", writable: true);
+                    progId?.SetValue(PreviousAssociationPrefix + extension, current ?? string.Empty);
+                }
                 key?.SetValue(string.Empty, ProgId);
             }
         }
@@ -37,7 +44,15 @@ public static class FileAssociationRegistration
                 using var key = Registry.CurrentUser.OpenSubKey($@"Software\Classes\{extension}", writable: false);
                 var current = key?.GetValue(string.Empty)?.ToString();
                 if (string.Equals(current, ProgId, StringComparison.Ordinal))
-                    Registry.CurrentUser.DeleteSubKeyTree($@"Software\Classes\{extension}", throwOnMissingSubKey: false);
+                {
+                    using var writableKey = Registry.CurrentUser.OpenSubKey($@"Software\Classes\{extension}", writable: true);
+                    using var progId = Registry.CurrentUser.OpenSubKey($@"Software\Classes\{ProgId}", writable: false);
+                    var previous = progId?.GetValue(PreviousAssociationPrefix + extension)?.ToString();
+                    if (string.IsNullOrEmpty(previous))
+                        writableKey?.DeleteValue(string.Empty, throwOnMissingValue: false);
+                    else
+                        writableKey?.SetValue(string.Empty, previous);
+                }
             }
 
             Registry.CurrentUser.DeleteSubKeyTree($@"Software\Classes\{ProgId}", throwOnMissingSubKey: false);

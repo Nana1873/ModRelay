@@ -78,6 +78,16 @@ public sealed class SettingsLayoutTests
     }
 
     [Fact]
+    public void Header_ShowsSemanticVersion()
+    {
+        using var form = new SettingsForm(new AppConfig());
+
+        Assert.Contains(FindControls<Label>(form), label =>
+            label.Text.StartsWith("ModRelay v", StringComparison.Ordinal) &&
+            label.Text.Count(character => character == '.') >= 2);
+    }
+
+    [Fact]
     public void LightModeCanBeSelectedExplicitly()
     {
         using var temp = new TestDirectory();
