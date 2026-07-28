@@ -25,6 +25,7 @@ public sealed class ModPipeline : IDisposable
 
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _worker;
+    private Task? _retryTask;
     private Timer? _retryTimer;
     private int _retryRunning;
 
@@ -48,7 +49,9 @@ public sealed class ModPipeline : IDisposable
 
     public void Start()
     {
-        _pending.Load();
+        if (!_pending.Load() && _config().ShowErrorNotifications)
+            _ui.Notify("Retry queue could not be read",
+                "The damaged queue was backed up. Previously queued mods need to be submitted again.", isError: true);
         _worker ??= Task.Run(() => RunAsync(_shutdown.Token));
         _retryTimer ??= new Timer(_ => RetryPending(), null, RetryInterval, RetryInterval);
     }
@@ -158,6 +161,13 @@ public sealed class ModPipeline : IDisposable
                     _ui.UpdateArchiveProgress($"{current} of {selected.Count} — {message}");
                 }), cancellationToken);
         }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            Log.Warn($"Extraction of {archivePath} was stopped; the archive was kept.", ex);
+            if (_config().ShowErrorNotifications)
+                _ui.Notify("Archive extraction stopped", ex.Message, isError: true);
+            return;
+        }
         finally
         {
             await _ui.EndArchiveProgressAsync();
@@ -215,9 +225,9 @@ public sealed class ModPipeline : IDisposable
 
         _ui.Status($"Upgrading {fileName} … (this may take a few minutes)");
 
-        var target = Path.Combine(
+        var target = UniqueGeneratedPath(Path.Combine(
             Path.GetDirectoryName(modPath)!,
-            Path.GetFileNameWithoutExtension(modPath) + "_dt.ttmp2");
+            Path.GetFileNameWithoutExtension(modPath) + "_dt.ttmp2"));
 
         _ignoreGeneratedFile(target);
 
@@ -226,6 +236,7 @@ public sealed class ModPipeline : IDisposable
         switch (result.Status)
         {
             case UpgradeStatus.Upgraded:
+                _ignoreGeneratedFile(result.OutputPath!);
                 if (config.ShowNotifications)
                     _ui.Notify("Auf Dawntrail aktualisiert", fileName);
 
@@ -290,14 +301,17 @@ public sealed class ModPipeline : IDisposable
                 _pending.Remove(modPath);
                 if (config.ShowErrorNotifications)
                     _ui.Notify("Import accepted",
-                        $"{result.ModName} was queued by Penumbra. The source file was kept because completion was not confirmed.");
+                        $"{result.ModName} was queued by Penumbra. Verify it in Penumbra before deleting the retained source file.");
                 break;
 
             case InstallOutcome.PenumbraUnreachable:
-                _pending.Add(modPath);
+                var queueSaved = _pending.Add(modPath);
                 if (config.ShowErrorNotifications)
-                    _ui.Notify("Penumbra is unavailable",
-                        $"{result.ModName} will be installed as soon as Penumbra is available.");
+                    _ui.Notify(queueSaved ? "Penumbra is unavailable" : "Retry queue could not be saved",
+                        queueSaved
+                            ? $"{result.ModName} will be installed as soon as Penumbra is available."
+                            : $"Keep ModRelay running or submit {result.ModName} again later; its retry could not be persisted.",
+                        isError: !queueSaved);
                 break;
 
             default:
@@ -313,7 +327,7 @@ public sealed class ModPipeline : IDisposable
             Interlocked.CompareExchange(ref _retryRunning, 1, 0) != 0)
             return;
 
-        _ = Task.Run(async () =>
+        _retryTask = Task.Run(async () =>
         {
             try
             {
@@ -337,6 +351,22 @@ public sealed class ModPipeline : IDisposable
                 Interlocked.Exchange(ref _retryRunning, 0);
             }
         }, _shutdown.Token);
+    }
+
+    private static string UniqueGeneratedPath(string path)
+    {
+        if (!File.Exists(path))
+            return path;
+
+        var directory = Path.GetDirectoryName(path)!;
+        var name = Path.GetFileNameWithoutExtension(path);
+        var extension = Path.GetExtension(path);
+        for (var suffix = 2; ; suffix++)
+        {
+            var candidate = Path.Combine(directory, $"{name} ({suffix}){extension}");
+            if (!File.Exists(candidate))
+                return candidate;
+        }
     }
 
     /// <summary>
@@ -375,7 +405,18 @@ public sealed class ModPipeline : IDisposable
         _shutdown.Cancel();
         _queue.Writer.TryComplete();
         _retryTimer?.Dispose();
+        WaitForShutdown(_worker);
+        WaitForShutdown(_retryTask);
         _shutdown.Dispose();
+    }
+
+    private static void WaitForShutdown(Task? task)
+    {
+        if (task is null || task.IsCompleted || Task.CurrentId == task.Id)
+            return;
+
+        try { task.Wait(TimeSpan.FromSeconds(2)); }
+        catch (AggregateException ex) when (ex.InnerExceptions.All(e => e is OperationCanceledException)) { }
     }
 
     private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>

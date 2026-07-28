@@ -46,8 +46,6 @@ public sealed class AppConfig
     /// <summary>Full path to TexTools' ConsoleTools.exe. Empty means "not set up".</summary>
     public string TexToolsConsolePath { get; set; } = string.Empty;
 
-    public int PenumbraPort { get; set; } = 42069;
-
     public int PenumbraTimeoutSeconds { get; set; } = 60;
 
     /// <summary>

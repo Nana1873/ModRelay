@@ -7,6 +7,14 @@ namespace ModRelay.Tests;
 public sealed class UpdateCheckerTests
 {
     [Fact]
+    public void InformationalVersion_IsDisplayedAsSemVerWithoutBuildMetadata()
+    {
+        var display = AppVersion.FromInformationalVersion("1.2.3-beta.1+commit.abcdef", new Version(1, 0));
+
+        Assert.Equal("v1.2.3-beta.1", display);
+    }
+
+    [Fact]
     public async Task NewerOfficialRelease_IsReportedAsAvailable()
     {
         using var http = new HttpClient(new JsonHandler("""

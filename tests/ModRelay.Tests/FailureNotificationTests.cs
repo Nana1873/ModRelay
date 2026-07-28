@@ -100,7 +100,7 @@ public sealed class FailureNotificationTests
         var notification = Assert.Single(ui.Notifications);
         Assert.Equal("Import accepted", notification.Title);
         Assert.False(notification.IsError);
-        Assert.Contains("completion was not confirmed", notification.Message);
+        Assert.Contains("Verify it in Penumbra", notification.Message);
         Assert.True(File.Exists(package));
     }
 

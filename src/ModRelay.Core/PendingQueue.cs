@@ -24,7 +24,7 @@ public sealed class PendingQueue(string filePath)
         }
     }
 
-    public void Load()
+    public bool Load()
     {
         lock (_gate)
         {
@@ -33,39 +33,48 @@ public sealed class PendingQueue(string filePath)
             try
             {
                 if (!File.Exists(filePath))
-                    return;
+                    return true;
 
                 var stored = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(filePath)) ?? [];
                 _items.AddRange(stored.Where(File.Exists));
 
+                if (_items.Count != stored.Count)
+                    Persist();
+
                 if (_items.Count > 0)
                     Log.Info($"{_items.Count} mod(s) waiting for Penumbra.");
+
+                return true;
             }
             catch (Exception ex)
             {
                 Log.Warn($"Could not read the pending queue at {filePath}.", ex);
+                BackupBrokenFile();
+                return false;
             }
         }
     }
 
-    public void Add(string path)
+    public bool Add(string path)
     {
         lock (_gate)
         {
             if (_items.Contains(path, StringComparer.OrdinalIgnoreCase))
-                return;
+                return true;
 
             _items.Add(path);
-            Persist();
+            return Persist();
         }
     }
 
-    public void Remove(string path)
+    public bool Remove(string path)
     {
         lock (_gate)
         {
             if (_items.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)) > 0)
-                Persist();
+                return Persist();
+
+            return true;
         }
     }
 
@@ -75,19 +84,42 @@ public sealed class PendingQueue(string filePath)
             return [.. _items];
     }
 
-    private void Persist()
+    private bool Persist()
     {
+        var temp = filePath + ".tmp";
         try
         {
             var directory = Path.GetDirectoryName(filePath);
             if (!string.IsNullOrEmpty(directory))
                 Directory.CreateDirectory(directory);
 
-            File.WriteAllText(filePath, JsonSerializer.Serialize(_items));
+            File.WriteAllText(temp, JsonSerializer.Serialize(_items));
+            File.Move(temp, filePath, overwrite: true);
+            return true;
         }
         catch (Exception ex)
         {
             Log.Warn($"Could not save the pending queue to {filePath}.", ex);
+            TryDelete(temp);
+            return false;
         }
+    }
+
+    private void BackupBrokenFile()
+    {
+        try
+        {
+            File.Copy(filePath, filePath + ".broken", overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Could not back up the unreadable pending queue.", ex);
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { File.Delete(path); }
+        catch { /* A stale temporary queue file is harmless. */ }
     }
 }

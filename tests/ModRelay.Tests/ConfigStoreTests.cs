@@ -17,7 +17,6 @@ public sealed class ConfigStoreTests
             ShowTrayNotifications = false,
             PlayNotificationSounds = false,
             AutoUpgradeToDawntrail = true,
-            PenumbraPort = 42123,
             WatchFolders = [temp.Path]
         };
 
@@ -30,7 +29,6 @@ public sealed class ConfigStoreTests
         Assert.False(loaded.ShowTrayNotifications);
         Assert.False(loaded.PlayNotificationSounds);
         Assert.True(loaded.AutoUpgradeToDawntrail);
-        Assert.Equal(42123, loaded.PenumbraPort);
         Assert.Equal([temp.Path], loaded.WatchFolders);
     }
 
@@ -43,7 +41,7 @@ public sealed class ConfigStoreTests
 
         var loaded = new ConfigStore(path).Load();
 
-        Assert.Equal(42069, loaded.PenumbraPort);
+        Assert.Equal(60, loaded.PenumbraTimeoutSeconds);
         Assert.NotNull(loaded.WatchFolders);
         Assert.True(File.Exists(path + ".broken"));
     }

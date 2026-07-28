@@ -103,6 +103,16 @@ public sealed class TexToolsUpgrader
             return new UpgradeResult(UpgradeStatus.ToolMissing, null, -1, string.Empty);
         }
 
+        if (File.Exists(targetPath))
+        {
+            Log.Warn($"Refusing to overwrite an existing upgrade output at {targetPath}.");
+            return new UpgradeResult(
+                UpgradeStatus.Failed,
+                null,
+                -1,
+                "The upgrade output already exists. A new output name is required.");
+        }
+
         var startInfo = new ProcessStartInfo
         {
             FileName = consoleToolsPath,
@@ -135,7 +145,7 @@ public sealed class TexToolsUpgrader
 
             var produced = File.Exists(targetPath);
 
-            if (process.ExitCode == 0 && produced)
+            if (process.ExitCode == 0 && produced && new FileInfo(targetPath).Length > 0)
             {
                 Log.Info($"Upgrade succeeded: {targetPath}");
                 return new UpgradeResult(UpgradeStatus.Upgraded, targetPath, 0, output);
@@ -143,6 +153,16 @@ public sealed class TexToolsUpgrader
 
             if (process.ExitCode == 0)
             {
+                if (produced)
+                {
+                    TryDelete(targetPath);
+                    return new UpgradeResult(
+                        UpgradeStatus.Failed,
+                        null,
+                        0,
+                        "ConsoleTools produced an empty upgrade output.");
+                }
+
                 Log.Info($"ConsoleTools reported nothing to upgrade for {sourcePath}.");
                 return new UpgradeResult(UpgradeStatus.NotNeeded, null, 0, output);
             }
@@ -158,10 +178,12 @@ public sealed class TexToolsUpgrader
         catch (OperationCanceledException)
         {
             TryKill(process);
+            TryDelete(targetPath);
             throw;
         }
         catch (Exception ex)
         {
+            TryDelete(targetPath);
             Log.Error($"Could not run ConsoleTools.exe for {sourcePath}.", ex);
             return new UpgradeResult(UpgradeStatus.Failed, null, -1, ex.Message);
         }
