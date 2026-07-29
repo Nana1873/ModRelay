@@ -19,6 +19,18 @@ public sealed class ReadinessAndUpgradeTests
     }
 
     [Fact]
+    public void FileReadiness_IgnoresAnUnrelatedPartialFileWithTheSameStem()
+    {
+        using var temp = new TestDirectory();
+        var file = temp.File("mod.zip");
+        File.WriteAllText(file, "content");
+        File.WriteAllText(temp.File("modpack.part"), "partial");
+
+        Assert.False(FileReadiness.IsReady(file, -1, out var size));
+        Assert.True(FileReadiness.IsReady(file, size, out _));
+    }
+
+    [Fact]
     public async Task TexTools_MissingExecutable_IsAnExplicitFailure()
     {
         using var temp = new TestDirectory();

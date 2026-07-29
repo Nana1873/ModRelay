@@ -28,7 +28,7 @@ public sealed class ConfigStore(string configFilePath)
             if (!File.Exists(FilePath))
             {
                 Log.Info($"No config at {FilePath}; starting with defaults.");
-                return WithDefaults(new AppConfig());
+                return WithDefaults(new AppConfig(), addDefaultWatchFolder: true);
             }
 
             try
@@ -36,7 +36,7 @@ public sealed class ConfigStore(string configFilePath)
                 var json = File.ReadAllText(FilePath);
                 var config = JsonSerializer.Deserialize<AppConfig>(json, Options);
                 if (config is not null)
-                    return WithDefaults(config);
+                    return WithDefaults(config, addDefaultWatchFolder: false);
 
                 Log.Warn($"Config at {FilePath} deserialised to null; using defaults.");
             }
@@ -46,7 +46,7 @@ public sealed class ConfigStore(string configFilePath)
                 BackupBrokenFile();
             }
 
-            return WithDefaults(new AppConfig());
+            return WithDefaults(new AppConfig(), addDefaultWatchFolder: true);
         }
     }
 
@@ -70,11 +70,11 @@ public sealed class ConfigStore(string configFilePath)
         }
     }
 
-    private static AppConfig WithDefaults(AppConfig config)
+    private static AppConfig WithDefaults(AppConfig config, bool addDefaultWatchFolder)
     {
         config.WatchFolders ??= [];
 
-        if (config.WatchFolders.Count == 0)
+        if (addDefaultWatchFolder && config.WatchFolders.Count == 0)
         {
             var downloads = DefaultDownloadFolder();
             if (downloads is not null)

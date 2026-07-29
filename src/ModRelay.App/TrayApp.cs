@@ -60,7 +60,10 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
         {
             if (_pendingUpdateUrl is not null)
                 OpenUrl(_pendingUpdateUrl);
-        }) { Visible = false };
+        })
+        {
+            Visible = false
+        };
         var openLog = new ToolStripMenuItem("Open log", null, (_, _) => OpenLog());
         var openData = new ToolStripMenuItem("Open ModRelay data folder", null, (_, _) => OpenPath(AppPaths.DataDirectory));
         var debugging = new ToolStripMenuItem("Debugging");
@@ -522,8 +525,9 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
     {
         OnUi(() =>
         {
-            _statusItem.Text = message;
-            _trayIcon.Text = Shorten($"{AppPaths.AppName} – {message}", 63);
+            var displayed = message == "Ready" && _watcher.Paused ? "Paused" : message;
+            _statusItem.Text = displayed;
+            _trayIcon.Text = Shorten($"{AppPaths.AppName} – {displayed}", 63);
         });
     }
 
