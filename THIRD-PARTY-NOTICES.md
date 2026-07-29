@@ -5,7 +5,7 @@ assets from other mod-forwarding applications are included.
 
 ## SharpCompress 0.50.1
 
-Copyright (c) 2025 Adam Hathcock
+Copyright (c) 2014 Adam Hathcock
 
 https://github.com/adamhathcock/sharpcompress
 
@@ -32,5 +32,5 @@ SOFTWARE.
 ## Microsoft .NET runtime
 
 The portable, self-contained release includes the Microsoft .NET runtime.
-Each release ZIP includes Microsoft's unmodified `DOTNET-LICENSE.txt` and
-`DOTNET-THIRD-PARTY-NOTICES.txt` files generated from the build environment.
+The release ZIP preserves Microsoft's license and third-party notices verbatim
+as dedicated sections in the bundled `LICENSES.txt` file.

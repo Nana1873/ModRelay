@@ -21,9 +21,43 @@ jobs:
           $version = "${{ github.ref_name }}".TrimStart('v')
           $package = "artifacts/package/ModRelay"
           dotnet publish src/ModRelay.App/ModRelay.App.csproj -c Release -r win-x64 --self-contained true -o $package -p:Version=$version -p:RepositoryUrl=https://github.com/${{ github.repository }}
-          Copy-Item README.md, LICENSE, THIRD-PARTY-NOTICES.md $package/
-          Copy-Item "$env:ProgramFiles/dotnet/LICENSE.txt" "$package/DOTNET-LICENSE.txt"
-          Copy-Item "$env:ProgramFiles/dotnet/ThirdPartyNotices.txt" "$package/DOTNET-THIRD-PARTY-NOTICES.txt"
+
+          @(
+            "ModRelay $version"
+            ""
+            "Extract the ModRelay folder to a writable location and run ModRelay.exe."
+            "Enable Penumbra's HTTP API under Settings -> Advanced, then select the folders to watch."
+            ""
+            "Documentation and releases: https://github.com/${{ github.repository }}"
+            "License information: LICENSES.txt"
+          ) | Set-Content "$package/README.txt" -Encoding utf8
+
+          $separator = "=" * 80
+          @(
+            $separator
+            "MODRELAY LICENSE"
+            $separator
+            (Get-Content LICENSE -Raw)
+            $separator
+            "SHARPCOMPRESS LICENSE AND THIRD-PARTY NOTICES"
+            $separator
+            (Get-Content THIRD-PARTY-NOTICES.md -Raw)
+            $separator
+            "MICROSOFT .NET LICENSE"
+            $separator
+            (Get-Content "$env:ProgramFiles/dotnet/LICENSE.txt" -Raw)
+            $separator
+            "MICROSOFT .NET THIRD-PARTY NOTICES"
+            $separator
+            (Get-Content "$env:ProgramFiles/dotnet/ThirdPartyNotices.txt" -Raw)
+          ) -join "`r`n`r`n" | Set-Content "$package/LICENSES.txt" -Encoding utf8
+
+          $expectedFiles = @("LICENSES.txt", "ModRelay.exe", "README.txt")
+          $actualFiles = @(Get-ChildItem $package -File | Sort-Object Name | Select-Object -ExpandProperty Name)
+          if (Compare-Object $expectedFiles $actualFiles) {
+            throw "Unexpected release package contents: $($actualFiles -join ', ')"
+          }
+
           Compress-Archive -Path $package -DestinationPath artifacts/ModRelay-win-x64.zip
           (Get-FileHash artifacts/ModRelay-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content artifacts/ModRelay-win-x64.zip.sha256
       - shell: pwsh
