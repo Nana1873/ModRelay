@@ -17,8 +17,8 @@ public sealed class ArchivePipelineTests
 
         var output = Path.Combine(temp.Path, "bundle");
         Assert.Equal(1, ui.SelectionCount);
-        Assert.Equal(2, ui.ProgressStarts);
-        Assert.Equal(2, ui.ProgressEnds);
+        Assert.Equal(1, ui.ProgressStarts);
+        Assert.Equal(1, ui.ProgressEnds);
         Assert.Contains(ui.ProgressMessages, message => message.Contains("1 of 1", StringComparison.Ordinal));
         Assert.False(File.Exists(Path.Combine(output, "first.pmp")));
         Assert.True(File.Exists(Path.Combine(output, "second.ttmp2")));
@@ -66,6 +66,22 @@ public sealed class ArchivePipelineTests
 
         Assert.Equal(1, ui.SelectionCount);
         Assert.False(Directory.Exists(Path.Combine(temp.Path, "bundle")));
+        Assert.True(File.Exists(archivePath));
+    }
+
+    [Fact]
+    public async Task UnrelatedArchive_IsIgnoredWithoutShowingArchiveUi()
+    {
+        using var temp = new TestDirectory();
+        var archivePath = CreateArchive(temp, "photos/holiday.jpg", "documents/readme.txt");
+        var ui = new FakeInteraction(_ => throw new InvalidOperationException("Selection should not be shown."));
+        using var pipeline = CreatePipeline(temp, ui, extractAll: false);
+
+        await pipeline.ProcessAsync(archivePath, CancellationToken.None);
+
+        Assert.Equal(0, ui.SelectionCount);
+        Assert.Equal(0, ui.ProgressStarts);
+        Assert.Equal(0, ui.ProgressEnds);
         Assert.True(File.Exists(archivePath));
     }
 

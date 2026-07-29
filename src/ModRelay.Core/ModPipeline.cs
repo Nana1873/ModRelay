@@ -101,7 +101,6 @@ public sealed class ModPipeline : IDisposable
     {
         var name = Path.GetFileName(archivePath);
         _ui.Status($"Inspecting {name}");
-        await _ui.BeginArchiveProgressAsync(name, "Scanning folders and looking for mod packages…");
 
         IReadOnlyList<ArchiveEntryInfo> entries;
         try
@@ -115,10 +114,6 @@ public sealed class ModPipeline : IDisposable
                 _ui.Notify("Archive could not be read",
                     $"{name} is damaged, incomplete, or uses an unsupported archive format.", isError: true);
             return;
-        }
-        finally
-        {
-            await _ui.EndArchiveProgressAsync();
         }
 
         if (entries.Count == 0)
