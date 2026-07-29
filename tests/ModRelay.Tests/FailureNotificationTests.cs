@@ -104,6 +104,28 @@ public sealed class FailureNotificationTests
         Assert.True(File.Exists(package));
     }
 
+    [Fact]
+    public async Task AcceptedImport_ReportsWhenRetryQueueCannotBeUpdated()
+    {
+        using var temp = new TestDirectory();
+        var package = temp.File("queued.pmp");
+        File.WriteAllText(package, "package");
+        var queuePath = temp.File("pending.json");
+        Directory.CreateDirectory(queuePath);
+        var pending = new PendingQueue(queuePath);
+        Assert.False(pending.Add(package));
+        var ui = new RecordingInteraction();
+        using var pipeline = CreatePipeline(temp, ui, new ResponseHandler(
+            get: () => Json("{}"),
+            post: () => Json("{}")), pending);
+
+        await pipeline.ProcessAsync(package, CancellationToken.None);
+
+        Assert.Contains(ui.Notifications, notification =>
+            notification.Title == "Retry queue could not be updated" && notification.IsError);
+        Assert.Equal(0, pending.Count);
+    }
+
     private static ModPipeline CreatePipeline(
         TestDirectory temp,
         IUserInteraction ui,

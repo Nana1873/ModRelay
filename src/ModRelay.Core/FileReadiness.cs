@@ -50,14 +50,20 @@ public static class FileReadiness
         if (string.IsNullOrEmpty(directory))
             return false;
 
-        var stem = Path.GetFileNameWithoutExtension(path);
+        var fileName = Path.GetFileName(path);
 
         try
         {
-            foreach (var suffix in PartialSuffixes)
+            foreach (var candidatePath in Directory.EnumerateFiles(directory))
             {
-                // Firefox writes "foo.zip.part", Chrome "foo.zip.crdownload", others insert an id.
-                if (Directory.EnumerateFiles(directory, $"{stem}*{suffix}").Any())
+                var candidate = Path.GetFileName(candidatePath);
+                if (!candidate.StartsWith(fileName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var remainder = candidate[fileName.Length..];
+                if (PartialSuffixes.Any(suffix =>
+                        remainder.Equals(suffix, StringComparison.OrdinalIgnoreCase) ||
+                        (remainder.StartsWith('.') && remainder.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))))
                     return true;
             }
         }

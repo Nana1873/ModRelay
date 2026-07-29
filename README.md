@@ -4,11 +4,11 @@ ModRelay is a lightweight Windows tray app that watches FFXIV mod downloads, opt
 
 ## Features
 
-- watches one or more download folders
+- watches the top level of one or more download folders
 - supports `.ttmp`, `.ttmp2`, `.pmp`, `.pcp`, `.zip`, `.7z`, and `.rar`
 - recursively finds mod packages in archives and offers a checkbox multi-selection, or extracts all automatically
 - hands every selected package to Penumbra's native importer instead of modifying its mod directory
-- runs older mod packs through `ConsoleTools.exe /upgrade`
+- runs older `.ttmp` and `.ttmp2` packs through `ConsoleTools.exe /upgrade`; `.pmp` and `.pcp` packages go directly to Penumbra
 - never silently installs the original when a required upgrade fails
 - keeps a crash-safe persistent queue while Penumbra or the game is unavailable
 - optional notifications, automatic cleanup, and Windows startup
@@ -19,11 +19,12 @@ ModRelay is a lightweight Windows tray app that watches FFXIV mod downloads, opt
 
 ## Setup
 
-1. Start `ModRelay.exe`. The settings window opens on first launch; folder watching starts after you close it.
-2. Check the watched download folders.
-3. In Penumbra, enable **HTTP API** under **Settings → Advanced**. Penumbra's official endpoint uses `localhost:42069`.
-4. For Dawntrail upgrades, install [FFXIV TexTools](https://github.com/TexTools/FFXIV_TexTools_UI/releases). ModRelay detects `ConsoleTools.exe` automatically, or you can select it manually.
-5. Changes are saved automatically. Close the window with **X**; ModRelay continues running in the Windows notification area.
+1. Download `ModRelay-win-x64.zip` from the [latest release](https://github.com/Nana1873/ModRelay/releases/latest). The adjacent `.sha256` file can be used to verify the download.
+2. Extract the `ModRelay` folder to a writable location, then start `ModRelay.exe`. The settings window opens on first launch; folder watching starts after you close it.
+3. Check the watched download folders. ModRelay watches files created directly in those folders, not nested subfolders.
+4. In Penumbra, enable **HTTP API** under **Settings → Advanced**. Penumbra's official endpoint uses `localhost:42069`.
+5. For Dawntrail upgrades, install [FFXIV TexTools](https://github.com/TexTools/FFXIV_TexTools_UI/releases). ModRelay detects `ConsoleTools.exe` automatically, or you can select it manually.
+6. Changes are saved automatically. Close the window with **X**; ModRelay continues running in the Windows notification area.
 
 Double-click the tray icon to open settings. Closing the window with **X** keeps ModRelay in the tray and shows a reminder. The dark tray menu provides settings, manual import, pause, a Penumbra connection check, logs, resources, and exit actions.
 
@@ -56,12 +57,13 @@ ModRelay is an independent project and is not affiliated with or endorsed by Pen
 
 ## Development
 
-ModRelay requires the .NET 9 SDK and Windows.
+ModRelay requires the .NET 10 SDK and 64-bit Windows for development. The published app is self-contained and targets Windows 10 version 1809 or newer.
 
 ```powershell
-dotnet build ModRelay.sln
-dotnet test ModRelay.sln
-dotnet publish src\ModRelay.App\ModRelay.App.csproj -c Release -r win-x64 --self-contained true
+dotnet restore ModRelay.sln
+dotnet build ModRelay.sln -c Release --no-restore -warnaserror
+dotnet test ModRelay.sln -c Release --no-build
+dotnet publish src\ModRelay.App\ModRelay.App.csproj -c Release -r win-x64 --self-contained true --no-restore
 ```
 
 The published Windows x64 build is self-contained and does not require a separate .NET runtime installation. Extract the `ModRelay` folder anywhere writable and run `ModRelay.exe`; `settings.json` is created inside that folder on first launch.

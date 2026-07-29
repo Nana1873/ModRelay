@@ -33,6 +33,18 @@ public sealed class ConfigStoreTests
     }
 
     [Fact]
+    public void Save_AndLoad_PreservesAnExplicitlyEmptyWatchList()
+    {
+        using var temp = new TestDirectory();
+        var store = new ConfigStore(temp.File("settings.json"));
+        store.Save(new AppConfig { WatchFolders = [] });
+
+        var loaded = store.Load();
+
+        Assert.Empty(loaded.WatchFolders);
+    }
+
+    [Fact]
     public void Load_BrokenJson_ReturnsUsableDefaultsAndKeepsBackup()
     {
         using var temp = new TestDirectory();

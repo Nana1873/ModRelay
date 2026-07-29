@@ -36,4 +36,28 @@ public sealed class PendingQueueTests
         Assert.True(File.Exists(storage + ".broken"));
         Assert.Equal(0, queue.Count);
     }
+
+    [Fact]
+    public void FailedRemoval_IsFlushedAfterStorageBecomesWritableAgain()
+    {
+        using var temp = new TestDirectory();
+        var mod = temp.File("mod.pmp");
+        var storage = temp.File("pending.json");
+        File.WriteAllText(mod, "mod");
+        var queue = new PendingQueue(storage);
+        Assert.True(queue.Add(mod));
+
+        File.Delete(storage);
+        Directory.CreateDirectory(storage);
+        Assert.False(queue.Remove(mod));
+        Assert.True(queue.NeedsPersistence);
+
+        Directory.Delete(storage);
+        Assert.True(queue.Flush());
+        Assert.False(queue.NeedsPersistence);
+
+        var reloaded = new PendingQueue(storage);
+        Assert.True(reloaded.Load());
+        Assert.Equal(0, reloaded.Count);
+    }
 }

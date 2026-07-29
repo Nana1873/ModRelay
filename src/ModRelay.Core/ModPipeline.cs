@@ -27,6 +27,7 @@ public sealed class ModPipeline : IDisposable
     private Task? _worker;
     private Task? _retryTask;
     private Timer? _retryTimer;
+    private int _activeOperations;
     private int _retryRunning;
 
     public ModPipeline(
@@ -62,6 +63,7 @@ public sealed class ModPipeline : IDisposable
     {
         await foreach (var path in _queue.Reader.ReadAllAsync(cancellationToken))
         {
+            BeginOperation();
             try
             {
                 await ProcessAsync(path, cancellationToken);
@@ -78,7 +80,7 @@ public sealed class ModPipeline : IDisposable
             }
             finally
             {
-                _ui.Status("Ready");
+                EndOperation();
             }
         }
     }
@@ -286,14 +288,14 @@ public sealed class ModPipeline : IDisposable
                 if (config.ShowNotifications)
                     _ui.Notify("Mod imported", result.ModName);
 
-                _pending.Remove(modPath);
+                RemoveFromPending(modPath, config);
 
                 if (config.AutoDeleteMods)
                     TryDelete(modPath);
                 break;
 
             case InstallOutcome.Accepted:
-                _pending.Remove(modPath);
+                RemoveFromPending(modPath, config);
                 if (config.ShowErrorNotifications)
                     _ui.Notify("Import accepted",
                         $"{result.ModName} was queued by Penumbra. Verify it in Penumbra before deleting the retained source file.");
@@ -316,16 +318,33 @@ public sealed class ModPipeline : IDisposable
         }
     }
 
+    private void RemoveFromPending(string modPath, AppConfig config)
+    {
+        if (_pending.Remove(modPath) || !config.ShowErrorNotifications)
+            return;
+
+        _ui.Notify(
+            "Retry queue could not be updated",
+            $"{Path.GetFileName(modPath)} was processed, but its retry entry could not be removed. " +
+            "Keep ModRelay running and restore write access to its data folder before restarting.",
+            isError: true);
+    }
+
     private void RetryPending()
     {
-        if (_pending.Count == 0 || _shutdown.IsCancellationRequested ||
+        if ((_pending.Count == 0 && !_pending.NeedsPersistence) || _shutdown.IsCancellationRequested ||
             Interlocked.CompareExchange(ref _retryRunning, 1, 0) != 0)
             return;
 
         _retryTask = Task.Run(async () =>
         {
+            BeginOperation();
             try
             {
+                _pending.Flush();
+                if (_pending.Count == 0)
+                    return;
+
                 if (!await _penumbra.IsReachableAsync(_shutdown.Token))
                     return;
 
@@ -343,9 +362,18 @@ public sealed class ModPipeline : IDisposable
             }
             finally
             {
+                EndOperation();
                 Interlocked.Exchange(ref _retryRunning, 0);
             }
         }, _shutdown.Token);
+    }
+
+    private void BeginOperation() => Interlocked.Increment(ref _activeOperations);
+
+    private void EndOperation()
+    {
+        if (Interlocked.Decrement(ref _activeOperations) == 0)
+            _ui.Status("Ready");
     }
 
     private static string UniqueGeneratedPath(string path)

@@ -10,6 +10,7 @@ public sealed class PendingQueue(string filePath)
 {
     private readonly object _gate = new();
     private readonly List<string> _items = [];
+    private bool _needsPersistence;
 
     public PendingQueue() : this(AppPaths.PendingQueueFile)
     {
@@ -29,6 +30,7 @@ public sealed class PendingQueue(string filePath)
         lock (_gate)
         {
             _items.Clear();
+            _needsPersistence = false;
 
             try
             {
@@ -60,7 +62,7 @@ public sealed class PendingQueue(string filePath)
         lock (_gate)
         {
             if (_items.Contains(path, StringComparer.OrdinalIgnoreCase))
-                return true;
+                return !_needsPersistence || Persist();
 
             _items.Add(path);
             return Persist();
@@ -74,8 +76,23 @@ public sealed class PendingQueue(string filePath)
             if (_items.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)) > 0)
                 return Persist();
 
-            return true;
+            return !_needsPersistence || Persist();
         }
+    }
+
+    internal bool NeedsPersistence
+    {
+        get
+        {
+            lock (_gate)
+                return _needsPersistence;
+        }
+    }
+
+    internal bool Flush()
+    {
+        lock (_gate)
+            return !_needsPersistence || Persist();
     }
 
     public IReadOnlyList<string> Snapshot()
@@ -95,10 +112,12 @@ public sealed class PendingQueue(string filePath)
 
             File.WriteAllText(temp, JsonSerializer.Serialize(_items));
             File.Move(temp, filePath, overwrite: true);
+            _needsPersistence = false;
             return true;
         }
         catch (Exception ex)
         {
+            _needsPersistence = true;
             Log.Warn($"Could not save the pending queue to {filePath}.", ex);
             TryDelete(temp);
             return false;
