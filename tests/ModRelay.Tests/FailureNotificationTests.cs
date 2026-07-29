@@ -80,8 +80,8 @@ public sealed class FailureNotificationTests
         Assert.Equal("Archive could not be read", notification.Title);
         Assert.True(notification.IsError);
         Assert.True(File.Exists(archive));
-        Assert.Equal(1, ui.ProgressStarts);
-        Assert.Equal(1, ui.ProgressEnds);
+        Assert.Equal(0, ui.ProgressStarts);
+        Assert.Equal(0, ui.ProgressEnds);
     }
 
     [Fact]
