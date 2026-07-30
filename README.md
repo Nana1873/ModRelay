@@ -2,6 +2,25 @@
 
 ModRelay is a lightweight Windows tray app that watches FFXIV mod downloads, optionally upgrades older mod packs with TexTools, and relays them to Penumbra.
 
+![ModRelay general settings](docs/screenshots/settings-general.png)
+
+<details>
+<summary>More screenshots</summary>
+
+### Connections
+
+![ModRelay connections settings](docs/screenshots/settings-connections.png)
+
+### Advanced
+
+![ModRelay advanced settings](docs/screenshots/settings-advanced.png)
+
+### Import notification
+
+![ModRelay import accepted notification](docs/screenshots/import-accepted-notification.png)
+
+</details>
+
 ## Features
 
 - watches the top level of one or more download folders
