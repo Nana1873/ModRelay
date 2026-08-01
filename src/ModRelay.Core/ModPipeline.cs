@@ -235,7 +235,7 @@ public sealed class ModPipeline : IDisposable
             case UpgradeStatus.Upgraded:
                 _ignoreGeneratedFile(result.OutputPath!);
                 if (config.ShowNotifications)
-                    _ui.Notify("Auf Dawntrail aktualisiert", fileName);
+                    _ui.Notify("Updated for Dawntrail", fileName);
 
                 if (config.AutoDeleteMods)
                     TryDelete(modPath);
