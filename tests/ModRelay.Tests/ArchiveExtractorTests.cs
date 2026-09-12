@@ -46,6 +46,61 @@ public sealed class ArchiveExtractorTests
     }
 
     [Fact]
+    public void Extract_SelectionDistinguishesArchivePathsThatDifferOnlyByCase()
+    {
+        using var temp = new TestDirectory();
+        var archivePath = temp.File("variants.zip");
+        using (var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+        {
+            WriteEntry(archive, "mod.pmp", "selected");
+            WriteEntry(archive, "MOD.pmp", "not selected");
+        }
+
+        var files = new ArchiveExtractor().Extract(archivePath, ["mod.pmp"], temp.File("out"));
+
+        Assert.Equal("selected", File.ReadAllText(Assert.Single(files)));
+    }
+
+    [Fact]
+    public void Extract_DoesNotDeleteAFileCreatedBySomeoneElseBeforeOutputIsOpened()
+    {
+        using var temp = new TestDirectory();
+        var archivePath = temp.File("race.zip");
+        using (var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+            WriteEntry(archive, "mod.pmp", "archive content");
+        var output = temp.File("out");
+        var collision = System.IO.Path.Combine(output, "mod.pmp");
+        var progress = new InlineProgress(_ => File.WriteAllText(collision, "someone else's file"));
+
+        Assert.Throws<IOException>(() =>
+            new ArchiveExtractor().Extract(archivePath, ["mod.pmp"], output, progress));
+
+        Assert.Equal("someone else's file", File.ReadAllText(collision));
+    }
+
+    [Fact]
+    public void Extract_CancellationDuringAnEntryRemovesOnlyItsOwnPartialOutput()
+    {
+        using var temp = new TestDirectory();
+        var archivePath = temp.File("cancel.zip");
+        using (var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+            WriteEntry(archive, "mod.pmp", new string('x', 1024));
+        var output = temp.File("out");
+        Directory.CreateDirectory(output);
+        var existing = System.IO.Path.Combine(output, "existing.pmp");
+        File.WriteAllText(existing, "keep");
+        using var cancellation = new CancellationTokenSource();
+        var progress = new InlineProgress(_ => cancellation.Cancel());
+
+        Assert.Throws<OperationCanceledException>(() =>
+            new ArchiveExtractor().Extract(archivePath, ["mod.pmp"], output, progress, cancellation.Token));
+
+        Assert.Equal(existing, Assert.Single(Directory.EnumerateFiles(output)));
+        Assert.Equal("keep", File.ReadAllText(existing));
+        Assert.True(File.Exists(archivePath));
+    }
+
+    [Fact]
     public void Inspect_RejectsWindowsDeviceAndAlternateStreamNames()
     {
         using var temp = new TestDirectory();
@@ -83,5 +138,10 @@ public sealed class ArchiveExtractorTests
         var entry = archive.CreateEntry(name);
         using var writer = new StreamWriter(entry.Open());
         writer.Write(content);
+    }
+
+    private sealed class InlineProgress(Action<string> report) : IProgress<string>
+    {
+        public void Report(string value) => report(value);
     }
 }

@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Net;
 using ModRelay.Core;
 
 namespace ModRelay.Tests;
@@ -22,6 +23,9 @@ public sealed class ArchivePipelineTests
         Assert.Contains(ui.ProgressMessages, message => message.Contains("1 of 1", StringComparison.Ordinal));
         Assert.False(File.Exists(Path.Combine(output, "first.pmp")));
         Assert.True(File.Exists(Path.Combine(output, "second.ttmp2")));
+        Assert.True(File.Exists(archivePath));
+        using var retainedArchive = ZipFile.OpenRead(archivePath);
+        Assert.Equal(2, retainedArchive.Entries.Count);
     }
 
     [Fact]
@@ -38,6 +42,33 @@ public sealed class ArchivePipelineTests
         Assert.Equal(0, ui.SelectionCount);
         Assert.True(File.Exists(Path.Combine(output, "first.pmp")));
         Assert.True(File.Exists(Path.Combine(output, "second.ttmp2")));
+    }
+
+    [Fact]
+    public async Task ExtractedFiles_AreIgnoredBeforeTheNextPackageStartsExtracting()
+    {
+        using var temp = new TestDirectory();
+        var archivePath = CreateArchive(temp, "first.pmp", "second.pmp");
+        var ignored = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var firstOutput = Path.Combine(temp.Path, "bundle", "first.pmp");
+        var observedSecondEntry = false;
+        var ui = new FakeInteraction(_ => [])
+        {
+            OnProgress = message =>
+            {
+                if (!message.Contains("second.pmp", StringComparison.Ordinal))
+                    return;
+                observedSecondEntry = true;
+                Assert.True(File.Exists(firstOutput));
+                Assert.Contains(firstOutput, ignored);
+            }
+        };
+        using var pipeline = CreatePipeline(temp, ui, extractAll: true, path => ignored.Add(path));
+
+        await pipeline.ProcessAsync(archivePath, CancellationToken.None);
+
+        Assert.True(observedSecondEntry);
+        Assert.Equal(2, ignored.Count);
     }
 
     [Fact]
@@ -85,23 +116,32 @@ public sealed class ArchivePipelineTests
         Assert.True(File.Exists(archivePath));
     }
 
-    private static ModPipeline CreatePipeline(TestDirectory temp, IUserInteraction ui, bool extractAll)
+    private static ModPipeline CreatePipeline(
+        TestDirectory temp, IUserInteraction ui, bool extractAll, Action<string>? ignoreGeneratedFile = null)
     {
         var config = new AppConfig
         {
             WatchFolders = [temp.Path],
             ExtractAllMods = extractAll,
-            AutoDeleteMods = false,
-            AutoForwardToPenumbra = false,
             AutoUpgradeToDawntrail = false
         };
         return new ModPipeline(
             () => config,
             new ArchiveExtractor(),
             new TexToolsUpgrader(),
-            new PenumbraClient(new HttpClient(), () => config),
+            new PenumbraClient(new HttpClient(new AcceptingHandler()), () => config),
             new PendingQueue(temp.File("pending.json")),
-            ui);
+            ui, ignoreGeneratedFile);
+    }
+
+    private sealed class AcceptingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}")
+            });
     }
 
     private static string CreateArchive(TestDirectory temp, params string[] entries)
@@ -123,6 +163,7 @@ public sealed class ArchivePipelineTests
         public int ProgressStarts { get; private set; }
         public int ProgressEnds { get; private set; }
         public List<string> ProgressMessages { get; } = [];
+        public Action<string>? OnProgress { get; init; }
 
         public Task BeginArchiveProgressAsync(string archiveName, string message)
         {
@@ -130,7 +171,11 @@ public sealed class ArchivePipelineTests
             return Task.CompletedTask;
         }
 
-        public void UpdateArchiveProgress(string message) => ProgressMessages.Add(message);
+        public void UpdateArchiveProgress(string message)
+        {
+            ProgressMessages.Add(message);
+            OnProgress?.Invoke(message);
+        }
 
         public Task EndArchiveProgressAsync()
         {
@@ -140,13 +185,13 @@ public sealed class ArchivePipelineTests
 
         public Task<IReadOnlyList<string>> SelectArchiveEntriesAsync(
             string archivePath,
-            IReadOnlyList<ArchiveEntryInfo> entries)
+            IReadOnlyList<ArchiveEntryInfo> entries, CancellationToken cancellationToken = default)
         {
             SelectionCount++;
             return Task.FromResult(select(entries));
         }
 
-        public Task<bool> ConfirmInstallWithoutUpgradeAsync(string fileName, UpgradeResult result) =>
+        public Task<bool> ConfirmInstallWithoutUpgradeAsync(string fileName, UpgradeResult result, CancellationToken cancellationToken = default) =>
             Task.FromResult(false);
 
         public void Notify(string title, string message, bool isError = false)

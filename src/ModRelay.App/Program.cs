@@ -8,7 +8,6 @@ static class Program
     private const string MutexName = @"Local\ModRelay.SingleInstance";
     private const string PipeName = "ModRelay.Commands";
     internal const string ShowSettingsCommand = "::show-settings::";
-    internal const string TestNotificationCommand = "::test-notification::";
 
     [STAThread]
     static void Main()

@@ -12,6 +12,9 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
     private readonly ContextMenuStrip _trayMenu;
     private readonly ToolStripMenuItem _pauseItem;
     private readonly ToolStripMenuItem _statusItem;
+    private readonly ToolStripMenuItem _queueItem;
+    private readonly ToolStripMenuItem _reviewItem;
+    private readonly ToolStripMenuItem _cancelItem;
     private readonly ToolStripMenuItem _updateAvailableItem;
     private readonly DownloadWatcher _watcher = new();
     private readonly HttpClient _httpClient = new();
@@ -21,13 +24,14 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
     private readonly ModPipeline _pipeline;
     private readonly PenumbraClient _penumbra;
     private readonly UpdateChecker _updateChecker;
-    private readonly WindowsNotificationService _notifications;
 
     private AppConfig _config;
     private bool _exiting;
     private bool _setupPending;
     private SettingsForm? _settingsForm;
     private ArchiveProgressForm? _archiveProgressForm;
+    private Form? _pipelineDialog;
+    private string _activityText = "Ready";
     private int _updateCheckRunning;
     private string? _pendingUpdateUrl;
     private Version? _pendingUpdateVersion;
@@ -50,6 +54,9 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
 
         _trayMenu = new ContextMenuStrip { Font = UiTheme.Font() };
         _statusItem = new ToolStripMenuItem("Ready") { Enabled = false };
+        _queueItem = new ToolStripMenuItem { Enabled = false, Visible = false };
+        _reviewItem = new ToolStripMenuItem("Imports need review — open log", null, (_, _) => OpenLog()) { Visible = false };
+        _cancelItem = new ToolStripMenuItem("Cancel current operation", null, (_, _) => CancelCurrentOperation()) { Enabled = false };
         var settings = new ToolStripMenuItem("Open settings", null, (_, _) => ShowSettings());
         settings.Font = new Font(settings.Font, FontStyle.Bold);
         _pauseItem = new ToolStripMenuItem("Pause watching", null, (_, _) => TogglePause()) { CheckOnClick = true };
@@ -65,26 +72,21 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
             Visible = false
         };
         var openLog = new ToolStripMenuItem("Open log", null, (_, _) => OpenLog());
-        var openData = new ToolStripMenuItem("Open ModRelay data folder", null, (_, _) => OpenPath(AppPaths.DataDirectory));
-        var debugging = new ToolStripMenuItem("Debugging");
-        debugging.DropDownItems.AddRange([openLog, openData]);
-        var resources = new ToolStripMenuItem("Resources");
-        resources.DropDownItems.Add("Penumbra on GitHub", null, (_, _) => OpenUrl("https://github.com/xivdev/Penumbra"));
-        resources.DropDownItems.Add("Download TexTools", null, (_, _) => OpenUrl(TexToolsUpgrader.DownloadUrl));
         var exit = new ToolStripMenuItem("Exit", null, (_, _) => Exit());
         _trayMenu.Items.AddRange([
             _statusItem,
+            _queueItem,
+            _reviewItem,
             new ToolStripSeparator(),
             settings,
             import,
             _pauseItem,
+            _cancelItem,
             checkPenumbra,
             checkUpdates,
             _updateAvailableItem,
             new ToolStripSeparator(),
-            debugging,
-            resources,
-            new ToolStripSeparator(),
+            openLog,
             exit
         ]);
         UiTheme.Apply(_trayMenu, _config.DarkMode);
@@ -97,12 +99,6 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
             ContextMenuStrip = _trayMenu
         };
         _trayIcon.DoubleClick += (_, _) => ShowSettings();
-        _notifications = new WindowsNotificationService(_trayIcon);
-
-        var testNotification = new ToolStripMenuItem("Test notification", null, (_, _) =>
-            Notify("ModRelay notifications work", "Windows can show import, error, and tray status notifications."));
-        debugging.DropDownItems.Insert(0, testNotification);
-        debugging.DropDownItems.Insert(1, new ToolStripSeparator());
 
         _penumbra = new PenumbraClient(_httpClient, () => _config);
         _pipeline = new ModPipeline(
@@ -115,6 +111,8 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
             path => _watcher.Ignore(path));
 
         _watcher.FileReady += _pipeline.Enqueue;
+        _watcher.FolderStatusesChanged += _ => OnUi(RefreshStatus);
+        _pipeline.StateChanged += _ => OnUi(RefreshStatus);
         _pipeline.Start();
         if (firstRun)
             Status("Complete setup to start watching");
@@ -156,6 +154,7 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
 
             var form = new SettingsForm(_config);
             _settingsForm = form;
+            form.UpdateWatchStatus(_watcher.FolderStatuses, _watcher.Paused, _setupPending);
             if (_pendingUpdateUrl is not null && _pendingUpdateVersion is not null)
                 form.ShowAvailableUpdate(_pendingUpdateVersion, _pendingUpdateUrl);
             form.ConfigChanged += ApplySettings;
@@ -172,7 +171,6 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
                         _setupPending = false;
                         RestartWatcher();
                     }
-                    _ = ShowMinimizedNotificationAsync();
                 }
             };
             WindowActivation.ShowAndActivate(form);
@@ -215,7 +213,7 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
             if (foldersChanged && !_setupPending)
                 RestartWatcher();
             UiTheme.Apply(_trayMenu, _config.DarkMode);
-            Status("Settings saved automatically");
+            RefreshStatus();
 
             if (updatesEnabled)
                 _ = CheckForUpdatesAsync(silent: true);
@@ -224,6 +222,7 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
         {
             if (!settingsCommitted)
                 TryRestoreRegistrations(previous, startupApplied, associationsApplied);
+            _settingsForm?.RestoreConfig(_config);
             Log.Error("The settings could not be saved completely.", ex);
             Notify("Settings could not be saved", ex.Message, isError: true);
         }
@@ -314,7 +313,8 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
         try
         {
             await Task.Delay(TimeSpan.FromSeconds(4), _shutdown.Token);
-            await CheckForUpdatesAsync(silent: true);
+            if (_config.AutoCheckForUpdates)
+                await CheckForUpdatesAsync(silent: true);
         }
         catch (OperationCanceledException)
         {
@@ -386,34 +386,6 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
         });
     }
 
-    private async Task ShowMinimizedNotificationAsync()
-    {
-        try
-        {
-            await Task.Delay(300, _shutdown.Token);
-            if (_config.ShowTrayNotifications)
-                Notify("ModRelay was minimized to the tray",
-                    "It is still running and watching your download folders.");
-        }
-        catch (OperationCanceledException)
-        {
-            // The application exited before the reminder was due.
-        }
-    }
-
-    private static void OpenPath(string path)
-    {
-        try
-        {
-            Directory.CreateDirectory(path);
-            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(ex.Message, AppPaths.AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
     private static void OpenUrl(string url)
     {
         try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
@@ -431,7 +403,7 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
                     PipeDirection.In,
                     maxNumberOfServerInstances: 1,
                     PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
+                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
 
                 await pipe.WaitForConnectionAsync(cancellationToken);
                 using var reader = new StreamReader(pipe);
@@ -439,8 +411,6 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
                 {
                     if (path == Program.ShowSettingsCommand)
                         ShowSettings();
-                    else if (path == Program.TestNotificationCommand)
-                        Notify("ModRelay notifications work", "Windows can show import, error, and tray status notifications.");
                     else
                         SubmitExternalFile(path);
                 }
@@ -468,18 +438,20 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
 
     public Task<IReadOnlyList<string>> SelectArchiveEntriesAsync(
         string archivePath,
-        IReadOnlyList<ArchiveEntryInfo> entries) =>
+        IReadOnlyList<ArchiveEntryInfo> entries,
+        CancellationToken cancellationToken = default) =>
         OnUiAsync<IReadOnlyList<string>>(() =>
         {
             using var form = new ArchiveSelectionForm(archivePath, entries, _config.DarkMode);
-            return form.ShowDialog() == DialogResult.OK ? form.SelectedKeys : [];
-        });
+            return ShowPipelineDialog(form, cancellationToken) == DialogResult.OK ? form.SelectedKeys : [];
+        }, cancellationToken);
 
     public Task BeginArchiveProgressAsync(string archiveName, string message) =>
         OnUiAsync(() =>
         {
             _archiveProgressForm?.Close();
             _archiveProgressForm = new ArchiveProgressForm(archiveName, message, _config.DarkMode);
+            _archiveProgressForm.CancelRequested += _pipeline.CancelCurrent;
             _archiveProgressForm.FormClosed += (_, _) => _archiveProgressForm = null;
             _archiveProgressForm.ShowOn(WindowActivation.ForegroundScreen());
             return true;
@@ -496,20 +468,36 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
             return true;
         });
 
-    public Task<bool> ConfirmInstallWithoutUpgradeAsync(string fileName, UpgradeResult result) =>
+    public Task<bool> ConfirmInstallWithoutUpgradeAsync(
+        string fileName, UpgradeResult result, CancellationToken cancellationToken = default) =>
         OnUiAsync(() =>
         {
-            var reason = result.Status == UpgradeStatus.ToolMissing
-                ? "TexTools ConsoleTools.exe is not configured."
-                : $"TexTools could not upgrade the mod (exit code {result.ExitCode}).";
-            var answer = MessageBox.Show(
-                $"{reason}\n\n{fileName}\n\nSend the unchanged original to Penumbra anyway?",
-                "Dawntrail upgrade failed",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2);
-            return answer == DialogResult.Yes;
-        });
+            using var form = new UpgradeConfirmationForm(fileName, result, _config.DarkMode);
+            return ShowPipelineDialog(form, cancellationToken) == DialogResult.Yes;
+        }, cancellationToken);
+
+    private DialogResult ShowPipelineDialog(Form form, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _pipelineDialog = form;
+        using var cancellation = cancellationToken.Register(() => OnUi(() =>
+        {
+            if (!form.IsDisposed)
+                form.Close();
+        }));
+        try
+        {
+            var result = form.ShowDialog();
+            cancellationToken.ThrowIfCancellationRequested();
+            return result;
+        }
+        finally
+        {
+            _pipelineDialog = null;
+        }
+    }
+
+    private void CancelCurrentOperation() => _pipeline.CancelCurrent();
 
     public void Notify(string title, string message, bool isError = false)
     {
@@ -517,7 +505,7 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
         {
             if (!_trayIcon.Visible)
                 return;
-            _notifications.Show(title, message, isError, _config.PlayNotificationSounds);
+            _trayIcon.ShowBalloonTip(5000, title, message, isError ? ToolTipIcon.Warning : ToolTipIcon.Info);
         });
     }
 
@@ -525,34 +513,71 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
     {
         OnUi(() =>
         {
-            var displayed = message == "Ready" && _watcher.Paused ? "Paused" : message;
-            _statusItem.Text = displayed;
-            _trayIcon.Text = Shorten($"{AppPaths.AppName} – {displayed}", 63);
+            _activityText = message;
+            RefreshStatus();
         });
+    }
+
+    private void RefreshStatus()
+    {
+        if (_exiting)
+            return;
+        var state = _pipeline.State;
+        var folders = _watcher.FolderStatuses;
+        var activity = (state.IsBusy || _activityText.StartsWith("Checking ", StringComparison.Ordinal)) &&
+                       _activityText is not ("Ready" or "Paused") ? _activityText : null;
+        var watching = TrayStatusText.Watching(folders, _watcher.Paused, _setupPending);
+        _statusItem.Text = state.SavePending ? "Queue not saved — keep ModRelay running"
+            : activity ?? (state.IsBusy ? $"Processing {state.CurrentFile}" : watching);
+        _queueItem.Text = TrayStatusText.Queue(state.QueuedCount, state.PendingCount);
+        _queueItem.Visible = state.QueuedCount > 0;
+        _reviewItem.Text = $"{state.ReviewCount} import(s) need review — open log";
+        _reviewItem.Visible = state.ReviewCount > 0;
+        _cancelItem.Enabled = state.CanCancel;
+        var summary = state.SavePending ? string.Empty
+            : state.ReviewCount > 0 ? $"{state.ReviewCount} need review · "
+            : state.QueuedCount > 0 ? $"{_queueItem.Text} · " : string.Empty;
+        _trayIcon.Text = Shorten($"{AppPaths.AppName} – {summary}{_statusItem.Text}", 63);
+        _settingsForm?.UpdateWatchStatus(folders, _watcher.Paused, _setupPending);
     }
 
     private void OnUi(Action action)
     {
         if (_exiting || _dispatcher.IsDisposed)
             return;
-        if (_dispatcher.InvokeRequired)
-            _dispatcher.BeginInvoke(action);
-        else
-            action();
+        try
+        {
+            if (_dispatcher.InvokeRequired)
+                _dispatcher.BeginInvoke(() =>
+                {
+                    if (!_exiting && !_dispatcher.IsDisposed)
+                        action();
+                });
+            else
+                action();
+        }
+        catch (InvalidOperationException) when (_exiting || _dispatcher.IsDisposed)
+        {
+            // Shutdown can dispose the dispatcher between the check and BeginInvoke.
+        }
     }
 
-    private Task<T> OnUiAsync<T>(Func<T> action)
+    private async Task<T> OnUiAsync<T>(Func<T> action, CancellationToken cancellationToken = default)
     {
         if (_exiting || _dispatcher.IsDisposed)
-            return Task.FromCanceled<T>(new CancellationToken(canceled: true));
+            throw new OperationCanceledException(new CancellationToken(canceled: true));
 
         var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellation = _shutdown.Token.Register(() => completion.TrySetCanceled());
+        using var operationCancellation = cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
         OnUi(() =>
         {
-            try { completion.SetResult(action()); }
-            catch (Exception ex) { completion.SetException(ex); }
+            if (completion.Task.IsCompleted)
+                return;
+            try { completion.TrySetResult(action()); }
+            catch (Exception ex) { completion.TrySetException(ex); }
         });
-        return completion.Task;
+        return await completion.Task;
     }
 
     private static string Shorten(string value, int maxLength) =>
@@ -563,10 +588,10 @@ internal sealed class TrayApp : ApplicationContext, IUserInteraction
         _exiting = true;
         _shutdown.Cancel();
         _settingsForm?.Close();
+        _pipelineDialog?.Close();
         _archiveProgressForm?.Close();
         _watcher.Dispose();
         _pipeline.Dispose();
-        _penumbra.Dispose();
         _httpClient.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();

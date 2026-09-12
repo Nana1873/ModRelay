@@ -5,21 +5,19 @@ namespace ModRelay.App;
 
 internal sealed class SettingsForm : SmoothDpiForm
 {
-    private readonly CheckBox _notifications = Toggle("Successful imports");
-    private readonly CheckBox _errorNotifications = Toggle("Import failures and problems");
-    private readonly CheckBox _trayNotifications = Toggle("Minimized to tray");
-    private readonly CheckBox _notificationSounds = Toggle("Play notification sounds");
-    private readonly CheckBox _autoForward = Toggle("Automatically send mods to Penumbra");
-    private readonly CheckBox _extractAll = Toggle("Extract every mod from archives");
+    private readonly CheckBox _errorNotifications = Toggle("Notify me about problems");
+    private readonly CheckBox _extractAll = Toggle("Import all mods without asking");
     private readonly CheckBox _runOnStartup = Toggle("Start with Windows");
-    private readonly CheckBox _autoDelete = Toggle("Delete processed downloads");
     private readonly CheckBox _autoUpgrade = Toggle("Upgrade Endwalker mods to Dawntrail");
-    private readonly CheckBox _associateFiles = Toggle("Open mod files with ModRelay");
-    private readonly CheckBox _installOnFailure = Toggle("Install the original when an upgrade fails");
+    private readonly CheckBox _associateFiles = Toggle("Register ModRelay for mod files");
     private readonly CheckBox _darkMode = Toggle("Use dark mode");
     private readonly CheckBox _autoCheckUpdates = Toggle("Check for updates automatically");
 
     private readonly ListBox _watchFolders = new();
+    private readonly Label _folderStatus = new();
+    private IReadOnlyList<WatchFolderStatus> _folderStatuses = [];
+    private bool _watchingPaused;
+    private bool _watchingSetupPending;
     private readonly TextBox _texToolsPath = new();
     private readonly Label _texToolsStatus = new();
     private readonly System.Windows.Forms.Timer _saveTimer = new() { Interval = 350 };
@@ -28,6 +26,8 @@ internal sealed class SettingsForm : SmoothDpiForm
     private readonly Label _updateText = new();
     private string? _updateUrl;
     private Panel? _pageHost;
+    private Control? _selectedPage;
+    private bool _loading;
 
     public AppConfig ResultConfig { get; private set; }
     public event Action<AppConfig>? ConfigChanged;
@@ -37,7 +37,7 @@ internal sealed class SettingsForm : SmoothDpiForm
         ResultConfig = config.Clone();
         Text = "ModRelay – Settings";
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(720, 540);
+        ClientSize = new Size(720, 510);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         BackColor = UiTheme.Background;
@@ -71,13 +71,18 @@ internal sealed class SettingsForm : SmoothDpiForm
         _updateUrl = releaseUrl;
         _updateText.Text = $"ModRelay {AppVersion.Format(version)} is available. Current: {AppVersion.Current}.";
         _updateBanner.Visible = true;
+        UpdateWindowHeight();
     }
 
     public void ClearAvailableUpdate()
     {
         _updateUrl = null;
         _updateBanner.Visible = false;
+        UpdateWindowHeight();
     }
+
+    private void UpdateWindowHeight() => ClientSize = new Size(ClientSize.Width,
+        (int)Math.Round((HasAvailableUpdate ? 560 : 510) * ClientSize.Width / 720d));
 
     private Control BuildUpdateBanner()
     {
@@ -137,7 +142,7 @@ internal sealed class SettingsForm : SmoothDpiForm
         });
         panel.Controls.Add(new Label
         {
-            Text = "Watch downloads, upgrade when needed, and relay mods to Penumbra. Changes save automatically.",
+            Text = "Imports are confirmed in Penumbra. Closing this window keeps ModRelay running.",
             ForeColor = Color.FromArgb(190, 196, 214),
             Font = UiTheme.Font(9),
             AutoSize = true,
@@ -170,9 +175,8 @@ internal sealed class SettingsForm : SmoothDpiForm
             Padding = Padding.Empty
         };
         _pageHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
-        AddPage(navigation, "General", BuildPage(BuildSwitchCard(), BuildFoldersCard()));
+        AddPage(navigation, "General", BuildPage(BuildFoldersCard(), BuildSwitchCard()));
         AddPage(navigation, "Connections", BuildPage(BuildTexToolsCard(), BuildPenumbraCard()));
-        AddPage(navigation, "Advanced", BuildPage(BuildNotificationCard(), BuildAdvancedCard()));
         root.Controls.Add(navigation, 0, 0);
         root.Controls.Add(_pageHost, 0, 1);
         ShowPage(_pages[0].Page);
@@ -209,6 +213,7 @@ internal sealed class SettingsForm : SmoothDpiForm
 
     private void ShowPage(Control page)
     {
+        _selectedPage = page;
         foreach (var entry in _pages)
             entry.Page.Visible = ReferenceEquals(entry.Page, page);
         page.BringToFront();
@@ -219,7 +224,7 @@ internal sealed class SettingsForm : SmoothDpiForm
     {
         foreach (var entry in _pages)
         {
-            var selected = entry.Page.Visible;
+            var selected = ReferenceEquals(entry.Page, _selectedPage);
             entry.Button.BackColor = selected
                 ? UiTheme.Accent
                 : _darkMode.Checked ? UiTheme.DarkSurface : UiTheme.Surface;
@@ -234,11 +239,11 @@ internal sealed class SettingsForm : SmoothDpiForm
 
     private Control BuildSwitchCard()
     {
-        var card = CardWithTitle("Automation", "Choose what ModRelay handles automatically.");
+        var card = CardWithTitle("Preferences", "Changes save automatically. Source archives and mod packages are always kept.");
         var grid = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 2, Padding = new Padding(0, 6, 0, 0) };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        var toggles = new[] { _notifications, _autoForward, _extractAll, _runOnStartup, _autoDelete, _autoUpgrade };
+        var toggles = new[] { _extractAll, _errorNotifications, _runOnStartup, _associateFiles, _darkMode, _autoCheckUpdates };
         for (var i = 0; i < toggles.Length; i++)
         {
             toggles[i].Dock = DockStyle.Fill;
@@ -250,11 +255,13 @@ internal sealed class SettingsForm : SmoothDpiForm
 
     private Control BuildTexToolsCard()
     {
-        var card = CardWithTitle("Dawntrail upgrade", "TexTools converts older mod packs before they reach Penumbra.");
-        var layout = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 3, Padding = new Padding(0, 6, 0, 0) };
+        var card = CardWithTitle("TexTools (optional)", "Convert older .ttmp/.ttmp2 packs before import. If an upgrade fails, ModRelay asks before sending the original.");
+        var layout = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 3, RowCount = 3, Padding = new Padding(0, 6, 0, 0) };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        for (var row = 0; row < layout.RowCount; row++)
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _texToolsPath.Dock = DockStyle.Fill;
         _texToolsPath.PlaceholderText = "Path to ConsoleTools.exe";
         var browse = UiTheme.Button("Browse");
@@ -265,16 +272,18 @@ internal sealed class SettingsForm : SmoothDpiForm
             _texToolsPath.Text = TexToolsUpgrader.Locate() ?? string.Empty;
             UpdateTexToolsStatus();
         };
-        layout.Controls.Add(_texToolsPath, 0, 0);
-        layout.Controls.Add(browse, 1, 0);
-        layout.Controls.Add(detect, 2, 0);
+        layout.Controls.Add(_autoUpgrade, 0, 0);
+        layout.SetColumnSpan(_autoUpgrade, 3);
+        layout.Controls.Add(_texToolsPath, 0, 1);
+        layout.Controls.Add(browse, 1, 1);
+        layout.Controls.Add(detect, 2, 1);
         _texToolsStatus.AutoSize = true;
         _texToolsStatus.Margin = new Padding(0, 5, 0, 0);
-        layout.Controls.Add(_texToolsStatus, 0, 1);
+        layout.Controls.Add(_texToolsStatus, 0, 2);
         layout.SetColumnSpan(_texToolsStatus, 2);
         var download = new LinkLabel { Text = "Download TexTools", AutoSize = true, Margin = new Padding(8, 5, 0, 0), LinkColor = UiTheme.Accent };
         download.LinkClicked += (_, _) => OpenUrl(TexToolsUpgrader.DownloadUrl);
-        layout.Controls.Add(download, 2, 1);
+        layout.Controls.Add(download, 2, 2);
         AddCardBody(card, layout);
         _texToolsPath.TextChanged += (_, _) => UpdateTexToolsStatus();
         return card;
@@ -282,11 +291,17 @@ internal sealed class SettingsForm : SmoothDpiForm
 
     private Control BuildFoldersCard()
     {
-        var card = CardWithTitle("Watched folders", "Detect mod files and archives when downloads finish.");
+        var card = CardWithTitle("Watched folders", "New downloads in these folders are sent to Penumbra. Existing files and subfolders are ignored.");
         var layout = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 1, Padding = new Padding(0, 6, 0, 0) };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        _watchFolders.Height = 66;
+        _watchFolders.IntegralHeight = false;
+        _watchFolders.Height = 54;
         _watchFolders.Dock = DockStyle.Fill;
+        _watchFolders.HorizontalScrollbar = true;
+        _watchFolders.SelectedIndexChanged += (_, _) => UpdateSelectedFolderStatus();
+        _folderStatus.AutoSize = true;
+        _folderStatus.Dock = DockStyle.Top;
+        _folderStatus.Margin = new Padding(0, 4, 0, 0);
         var buttons = new FlowLayoutPanel
         {
             AutoSize = true,
@@ -309,7 +324,8 @@ internal sealed class SettingsForm : SmoothDpiForm
         buttons.Controls.Add(add);
         buttons.Controls.Add(remove);
         layout.Controls.Add(_watchFolders, 0, 0);
-        layout.Controls.Add(buttons, 0, 1);
+        layout.Controls.Add(_folderStatus, 0, 1);
+        layout.Controls.Add(buttons, 0, 2);
         AddCardBody(card, layout);
         return card;
     }
@@ -321,55 +337,91 @@ internal sealed class SettingsForm : SmoothDpiForm
             "Enable its HTTP API under Settings → Advanced. ModRelay uses Penumbra's official localhost:42069 endpoint.");
     }
 
-    private Control BuildAdvancedCard()
-    {
-        var card = CardWithTitle("More options", "File associations apply only to your Windows account.");
-        var stack = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 2, Padding = new Padding(0, 5, 0, 0) };
-        stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        stack.Controls.Add(_darkMode, 0, 0);
-        stack.Controls.Add(_autoCheckUpdates, 1, 0);
-        stack.Controls.Add(_associateFiles, 0, 1);
-        _installOnFailure.ForeColor = Color.FromArgb(170, 75, 60);
-        _installOnFailure.Tag = "danger";
-        stack.Controls.Add(_installOnFailure, 0, 2);
-        stack.SetColumnSpan(_installOnFailure, 2);
-        AddCardBody(card, stack);
-        return card;
-    }
-
-    private Control BuildNotificationCard()
-    {
-        var card = CardWithTitle("Notifications", "Choose which events may appear in Windows and whether they make a sound.");
-        var stack = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 2, Padding = new Padding(0, 5, 0, 0) };
-        stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        stack.Controls.Add(_notifications, 0, 0);
-        stack.Controls.Add(_errorNotifications, 1, 0);
-        stack.Controls.Add(_trayNotifications, 0, 1);
-        stack.Controls.Add(_notificationSounds, 1, 1);
-        AddCardBody(card, stack);
-        return card;
-    }
-
     private void LoadConfig(AppConfig config)
     {
-        _notifications.Checked = config.ShowNotifications;
         _errorNotifications.Checked = config.ShowErrorNotifications;
-        _trayNotifications.Checked = config.ShowTrayNotifications;
-        _notificationSounds.Checked = config.PlayNotificationSounds;
-        _autoForward.Checked = config.AutoForwardToPenumbra;
         _extractAll.Checked = config.ExtractAllMods;
         _runOnStartup.Checked = config.RunOnStartup;
-        _autoDelete.Checked = config.AutoDeleteMods;
         _autoUpgrade.Checked = config.AutoUpgradeToDawntrail;
         _associateFiles.Checked = config.AssociateFileTypes;
-        _installOnFailure.Checked = config.InstallOriginalWhenUpgradeFails;
         _darkMode.Checked = config.DarkMode;
         _autoCheckUpdates.Checked = config.AutoCheckForUpdates;
         _texToolsPath.Text = config.TexToolsConsolePath;
+        _watchFolders.Items.Clear();
         foreach (var folder in config.WatchFolders)
-            _watchFolders.Items.Add(folder);
+            _watchFolders.Items.Add(new FolderItem(folder, "Not watching"));
+        RefreshFolderRows();
+    }
+
+    internal void UpdateWatchStatus(IReadOnlyList<WatchFolderStatus> statuses, bool paused, bool setupPending = false)
+    {
+        _folderStatuses = statuses;
+        _watchingPaused = paused;
+        _watchingSetupPending = setupPending;
+        RefreshFolderRows();
+    }
+
+    private void RefreshFolderRows()
+    {
+        var selected = _watchFolders.SelectedIndex;
+        _watchFolders.BeginUpdate();
+        try
+        {
+            for (var index = 0; index < _watchFolders.Items.Count; index++)
+            {
+                var item = (FolderItem)_watchFolders.Items[index];
+                var status = _folderStatuses.FirstOrDefault(status =>
+                    string.Equals(status.Path, item.Path, StringComparison.OrdinalIgnoreCase));
+                var label = _watchingSetupPending ? "Starts after setup"
+                    : status is { IsWatching: true } ? _watchingPaused ? "Paused"
+                        : status.Problem is null ? "Watching" : "Check folder"
+                    : "Not watching";
+                _watchFolders.Items[index] = item with { Status = label };
+            }
+            _watchFolders.SelectedIndex = selected;
+        }
+        finally
+        {
+            _watchFolders.EndUpdate();
+        }
+        UpdateSelectedFolderStatus();
+    }
+
+    private void UpdateSelectedFolderStatus()
+    {
+        var selected = (_watchFolders.SelectedItem as FolderItem)?.Path;
+        var status = _folderStatuses.FirstOrDefault(status =>
+            string.Equals(status.Path, selected, StringComparison.OrdinalIgnoreCase));
+        var problems = _folderStatuses.Count(status => !status.IsWatching || status.Problem is not null);
+        _folderStatus.Text = status?.Problem
+            ?? (_watchingSetupPending ? "Watching starts when you close settings."
+                : problems > 0 ? $"{problems} folder(s) need attention. Select a folder for details."
+                : _watchingPaused ? "Watching is paused. Resume it from the tray menu."
+                : _watchFolders.Items.Count == 0 ? "Add a folder to watch new downloads."
+                : _folderStatuses.Any(folder => folder.IsWatching) ? "New downloads will be sent to Penumbra."
+                : "Folder watching has not started.");
+        _folderStatus.ForeColor = status?.Problem is not null || problems > 0
+            ? Color.FromArgb(184, 115, 36) : _darkMode.Checked ? UiTheme.DarkMuted : UiTheme.Muted;
+    }
+
+    private sealed record FolderItem(string Path, string Status)
+    {
+        public override string ToString() => $"{Path}    [{Status}]";
+    }
+
+    internal void RestoreConfig(AppConfig config)
+    {
+        _saveTimer.Stop();
+        _loading = true;
+        try
+        {
+            ResultConfig = config.Clone();
+            LoadConfig(config);
+        }
+        finally
+        {
+            _loading = false;
+        }
     }
 
     private void WireAutoSave()
@@ -377,9 +429,8 @@ internal sealed class SettingsForm : SmoothDpiForm
         _saveTimer.Tick += (_, _) => SaveNow();
         foreach (var toggle in new[]
                  {
-                     _notifications, _errorNotifications, _trayNotifications, _notificationSounds,
-                     _autoForward, _extractAll, _runOnStartup, _autoDelete,
-                     _autoUpgrade, _associateFiles, _installOnFailure, _darkMode, _autoCheckUpdates
+                     _errorNotifications, _extractAll, _runOnStartup,
+                     _autoUpgrade, _associateFiles, _darkMode, _autoCheckUpdates
                  })
             toggle.CheckedChanged += (_, _) => SaveNow();
 
@@ -388,29 +439,27 @@ internal sealed class SettingsForm : SmoothDpiForm
 
     private void QueueSave()
     {
+        if (_loading)
+            return;
         _saveTimer.Stop();
         _saveTimer.Start();
     }
 
     private void SaveNow()
     {
+        if (_loading)
+            return;
         _saveTimer.Stop();
-        var folders = _watchFolders.Items.Cast<string>()
+        var folders = _watchFolders.Items.Cast<FolderItem>().Select(item => item.Path)
             .Where(folder => !string.IsNullOrWhiteSpace(folder))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        ResultConfig.ShowNotifications = _notifications.Checked;
         ResultConfig.ShowErrorNotifications = _errorNotifications.Checked;
-        ResultConfig.ShowTrayNotifications = _trayNotifications.Checked;
-        ResultConfig.PlayNotificationSounds = _notificationSounds.Checked;
-        ResultConfig.AutoForwardToPenumbra = _autoForward.Checked;
         ResultConfig.ExtractAllMods = _extractAll.Checked;
         ResultConfig.RunOnStartup = _runOnStartup.Checked;
-        ResultConfig.AutoDeleteMods = _autoDelete.Checked;
         ResultConfig.AutoUpgradeToDawntrail = _autoUpgrade.Checked;
         ResultConfig.AssociateFileTypes = _associateFiles.Checked;
-        ResultConfig.InstallOriginalWhenUpgradeFails = _installOnFailure.Checked;
         ResultConfig.DarkMode = _darkMode.Checked;
         ResultConfig.AutoCheckForUpdates = _autoCheckUpdates.Checked;
         ResultConfig.WatchFolders = folders;
@@ -429,6 +478,7 @@ internal sealed class SettingsForm : SmoothDpiForm
     {
         UiTheme.Apply(this, dark);
         UpdateTexToolsStatus();
+        UpdateSelectedFolderStatus();
         StylePageButtons();
         Invalidate(true);
     }
@@ -436,9 +486,10 @@ internal sealed class SettingsForm : SmoothDpiForm
     private void AddWatchFolder()
     {
         using var dialog = new FolderBrowserDialog { Description = "Select a download folder", UseDescriptionForTitle = true };
-        if (dialog.ShowDialog(this) == DialogResult.OK && !_watchFolders.Items.Cast<string>().Contains(dialog.SelectedPath, StringComparer.OrdinalIgnoreCase))
+        if (dialog.ShowDialog(this) == DialogResult.OK && !_watchFolders.Items.Cast<FolderItem>().Any(item =>
+                string.Equals(item.Path, dialog.SelectedPath, StringComparison.OrdinalIgnoreCase)))
         {
-            _watchFolders.Items.Add(dialog.SelectedPath);
+            _watchFolders.Items.Add(new FolderItem(dialog.SelectedPath, "Not watching"));
             SaveNow();
         }
     }
@@ -453,6 +504,7 @@ internal sealed class SettingsForm : SmoothDpiForm
     private static Panel CardWithTitle(string title, string description)
     {
         var card = UiTheme.Card();
+        card.Padding = new Padding(10);
         card.AutoSize = true;
         card.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         var layout = new TableLayoutPanel
@@ -487,12 +539,11 @@ internal sealed class SettingsForm : SmoothDpiForm
         Text = text,
         AutoSize = true,
         MinimumSize = new Size(0, 25),
+        Margin = new Padding(3, 0, 3, 0),
         Padding = new Padding(0, 1, 8, 1),
         ForeColor = UiTheme.Text,
         Cursor = Cursors.Hand
     };
-
-    private static Label LabelFor(string text) => new() { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = UiTheme.Muted, Margin = new Padding(0, 8, 12, 8) };
 
     private static void OpenUrl(string url)
     {

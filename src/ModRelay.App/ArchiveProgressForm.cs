@@ -7,12 +7,15 @@ internal sealed class ArchiveProgressForm : SmoothDpiForm
     private const int WsExToolWindow = 0x00000080;
     private const int WsExNoActivate = 0x08000000;
     private readonly Label _message;
+    private readonly Button _cancel;
+
+    public event Action? CancelRequested;
 
     public ArchiveProgressForm(string archiveName, string message, bool darkMode)
     {
         Text = "Preparing archive";
         StartPosition = FormStartPosition.Manual;
-        ClientSize = new Size(500, 142);
+        ClientSize = new Size(500, 188);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         ControlBox = false;
         ShowInTaskbar = false;
@@ -28,11 +31,12 @@ internal sealed class ArchiveProgressForm : SmoothDpiForm
             Dock = DockStyle.Fill,
             Padding = new Padding(20, 16, 20, 16),
             ColumnCount = 1,
-            RowCount = 4
+            RowCount = 5
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.Controls.Add(new Label
         {
@@ -66,6 +70,17 @@ internal sealed class ArchiveProgressForm : SmoothDpiForm
             Style = ProgressBarStyle.Marquee,
             MarqueeAnimationSpeed = 24
         });
+
+        _cancel = UiTheme.Button("Cancel extraction");
+        _cancel.Anchor = AnchorStyles.Right;
+        _cancel.Margin = new Padding(0, 8, 0, 0);
+        _cancel.Click += (_, _) =>
+        {
+            _cancel.Enabled = false;
+            _cancel.Text = "Cancelling…";
+            CancelRequested?.Invoke();
+        };
+        root.Controls.Add(_cancel);
 
         Controls.Add(root);
         HandleCreated += (_, _) => UiTheme.ApplyTitleBar(this, darkMode);

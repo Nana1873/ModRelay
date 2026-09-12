@@ -129,9 +129,7 @@ internal static class UiTheme
 
             case CheckBox checkBox:
                 checkBox.BackColor = surface;
-                checkBox.ForeColor = Equals(checkBox.Tag, "danger")
-                    ? Color.FromArgb(220, 120, 105)
-                    : text;
+                checkBox.ForeColor = text;
                 break;
 
             case Label label:

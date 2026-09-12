@@ -18,12 +18,14 @@ public interface IUserInteraction
     /// <summary>
     /// Asks which mods to take out of an archive. Return an empty list to skip the archive.
     /// </summary>
-    Task<IReadOnlyList<string>> SelectArchiveEntriesAsync(string archivePath, IReadOnlyList<ArchiveEntryInfo> entries);
+    Task<IReadOnlyList<string>> SelectArchiveEntriesAsync(
+        string archivePath, IReadOnlyList<ArchiveEntryInfo> entries, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// The Dawntrail upgrade did not happen. Install the untouched file anyway?
     /// </summary>
-    Task<bool> ConfirmInstallWithoutUpgradeAsync(string fileName, UpgradeResult result);
+    Task<bool> ConfirmInstallWithoutUpgradeAsync(
+        string fileName, UpgradeResult result, CancellationToken cancellationToken = default);
 
     void Notify(string title, string message, bool isError = false);
 

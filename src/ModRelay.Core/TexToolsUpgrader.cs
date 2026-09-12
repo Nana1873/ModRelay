@@ -29,8 +29,21 @@ public sealed class TexToolsUpgrader
 {
     private const string UninstallKey =
         @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\FFXIV_TexTools";
+    private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(5);
+
+    private readonly Func<ProcessStartInfo, Process> _processFactory;
 
     public const string DownloadUrl = "https://github.com/TexTools/FFXIV_TexTools_UI/releases";
+
+    public TexToolsUpgrader() : this(startInfo => new Process { StartInfo = startInfo })
+    {
+    }
+
+    // Keeps process lifetime behavior testable without adding a product dependency.
+    internal TexToolsUpgrader(Func<ProcessStartInfo, Process> processFactory)
+    {
+        _processFactory = processFactory ?? throw new ArgumentNullException(nameof(processFactory));
+    }
 
     /// <summary>
     /// Registry first, then the two standard install locations. Deliberately no
@@ -97,6 +110,8 @@ public sealed class TexToolsUpgrader
         string targetPath,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (string.IsNullOrWhiteSpace(consoleToolsPath) || !File.Exists(consoleToolsPath))
         {
             Log.Warn($"TexTools ConsoleTools.exe not available at '{consoleToolsPath}'.");
@@ -128,11 +143,14 @@ public sealed class TexToolsUpgrader
 
         Log.Info($"Running: \"{consoleToolsPath}\" /upgrade \"{sourcePath}\" \"{targetPath}\"");
 
-        using var process = new Process { StartInfo = startInfo };
+        using var process = _processFactory(startInfo);
+        var started = false;
 
         try
         {
-            process.Start();
+            if (!process.Start())
+                return new UpgradeResult(UpgradeStatus.Failed, null, -1, "ConsoleTools.exe did not start.");
+            started = true;
 
             // Read both pipes concurrently; reading them one after the other
             // deadlocks as soon as one of them fills up.
@@ -155,7 +173,7 @@ public sealed class TexToolsUpgrader
             {
                 if (produced)
                 {
-                    TryDelete(targetPath);
+                    TryDeleteOwnedOutput(targetPath);
                     return new UpgradeResult(
                         UpgradeStatus.Failed,
                         null,
@@ -171,38 +189,67 @@ public sealed class TexToolsUpgrader
 
             // A failed run can still leave a half-written file behind.
             if (produced)
-                TryDelete(targetPath);
+                TryDeleteOwnedOutput(targetPath);
 
             return new UpgradeResult(UpgradeStatus.Failed, null, process.ExitCode, output);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            TryKill(process);
-            TryDelete(targetPath);
-            throw;
+            // Only this Process instance was started for this conversion. Kill its
+            // descendants too, then wait until their handles have released the
+            // output before removing the file this run was allowed to create.
+            var stopped = await StopStartedProcessAsync(process);
+            if (started && stopped)
+                TryDeleteOwnedOutput(targetPath);
+            throw new OperationCanceledException(cancellationToken);
         }
         catch (Exception ex)
         {
-            TryDelete(targetPath);
+            if (started)
+            {
+                if (await StopStartedProcessAsync(process))
+                    TryDeleteOwnedOutput(targetPath);
+            }
             Log.Error($"Could not run ConsoleTools.exe for {sourcePath}.", ex);
             return new UpgradeResult(UpgradeStatus.Failed, null, -1, ex.Message);
         }
     }
 
-    private static void TryKill(Process process)
+    private static async Task<bool> StopStartedProcessAsync(Process process)
     {
         try
         {
             if (!process.HasExited)
                 process.Kill(entireProcessTree: true);
         }
+        catch (InvalidOperationException)
+        {
+            // It exited after the state check.
+            return true;
+        }
         catch (Exception ex)
         {
             Log.Warn("Could not stop ConsoleTools.exe.", ex);
         }
+
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(StopTimeout);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            Log.Warn("ConsoleTools.exe did not exit after cancellation; keeping its output in place.");
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            // A process that failed before it could start has no handle to await.
+            return true;
+        }
     }
 
-    private static void TryDelete(string path)
+    private static void TryDeleteOwnedOutput(string path)
     {
         try
         {
