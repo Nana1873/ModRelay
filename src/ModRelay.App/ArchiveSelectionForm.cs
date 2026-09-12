@@ -61,18 +61,13 @@ internal sealed class ArchiveSelectionForm : SmoothDpiForm
         _entries.Dock = DockStyle.Fill;
         _entries.CheckOnClick = true;
         _entries.BorderStyle = BorderStyle.FixedSingle;
-        var selectionMenu = new ContextMenuStrip { Font = UiTheme.Font() };
-        var selectAll = selectionMenu.Items.Add("Select all");
-        selectAll.Click += (_, _) => SetAllEntriesChecked(true);
-        var selectNone = selectionMenu.Items.Add("Select none");
-        selectNone.Click += (_, _) => SetAllEntriesChecked(false);
-        UiTheme.Apply(selectionMenu, darkMode);
-        _entries.ContextMenuStrip = selectionMenu;
         for (var i = 0; i < entries.Count; i++)
         {
             var entry = entries[i];
             var marker = entry.LooksPreDawntrail ? "[PRE-DT?]  " : string.Empty;
-            _entries.Items.Add($"{marker}{entry.FileName}", true);
+            // The archive key is deliberately shown instead of just FileName. Archives
+            // commonly contain variants with the same file name in different folders.
+            _entries.Items.Add($"{marker}{entry.Key}", false);
         }
         root.Controls.Add(_entries);
 
@@ -85,11 +80,28 @@ internal sealed class ArchiveSelectionForm : SmoothDpiForm
         };
         var take = UiTheme.Button("Extract selected", primary: true);
         take.DialogResult = DialogResult.OK;
+        take.Enabled = false;
         var cancel = UiTheme.Button("Skip");
         cancel.DialogResult = DialogResult.Cancel;
+        var clear = UiTheme.Button("Clear");
+        clear.Click += (_, _) => SetAllEntriesChecked(false);
+        var selectAll = UiTheme.Button("Select all");
+        selectAll.Click += (_, _) => SetAllEntriesChecked(true);
         buttons.Controls.Add(take);
         buttons.Controls.Add(cancel);
+        buttons.Controls.Add(clear);
+        buttons.Controls.Add(selectAll);
         root.Controls.Add(buttons);
+
+        _entries.ItemCheck += (_, eventArgs) =>
+        {
+            var selectedCount = _entries.CheckedIndices.Count;
+            if (eventArgs.CurrentValue == CheckState.Checked && eventArgs.NewValue != CheckState.Checked)
+                selectedCount--;
+            else if (eventArgs.CurrentValue != CheckState.Checked && eventArgs.NewValue == CheckState.Checked)
+                selectedCount++;
+            take.Enabled = selectedCount > 0;
+        };
 
         Controls.Add(root);
         AcceptButton = take;

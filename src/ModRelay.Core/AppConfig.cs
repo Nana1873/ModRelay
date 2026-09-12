@@ -5,29 +5,14 @@ namespace ModRelay.Core;
 /// </summary>
 public sealed class AppConfig
 {
-    /// <summary>Notification after a mod was handed to Penumbra successfully.</summary>
-    public bool ShowNotifications { get; set; } = true;
-
     /// <summary>Notifications for failed imports, damaged archives, and unavailable services.</summary>
     public bool ShowErrorNotifications { get; set; } = true;
-
-    /// <summary>Tell the user that closing the settings leaves ModRelay in the tray.</summary>
-    public bool ShowTrayNotifications { get; set; } = true;
-
-    /// <summary>Ask Windows to play its standard sound for ModRelay notifications.</summary>
-    public bool PlayNotificationSounds { get; set; } = true;
-
-    /// <summary>Send finished mods to Penumbra automatically.</summary>
-    public bool AutoForwardToPenumbra { get; set; } = true;
 
     /// <summary>Extract every mod inside an archive instead of asking which one.</summary>
     public bool ExtractAllMods { get; set; }
 
     /// <summary>Register under HKCU\...\Run.</summary>
     public bool RunOnStartup { get; set; }
-
-    /// <summary>Delete source archives and intermediate files once they are no longer needed.</summary>
-    public bool AutoDeleteMods { get; set; } = true;
 
     /// <summary>Run pre-Dawntrail mods through TexTools ConsoleTools /upgrade before installing.</summary>
     public bool AutoUpgradeToDawntrail { get; set; } = true;
@@ -47,13 +32,6 @@ public sealed class AppConfig
     public string TexToolsConsolePath { get; set; } = string.Empty;
 
     public int PenumbraTimeoutSeconds { get; set; } = 60;
-
-    /// <summary>
-    /// When the upgrade fails, install the untouched original anyway.
-    /// Off by default - silently installing an un-upgraded mod is the exact
-    /// behaviour that made the predecessor look broken.
-    /// </summary>
-    public bool InstallOriginalWhenUpgradeFails { get; set; }
 
     /// <summary>Creates an independent working copy for immediate UI updates.</summary>
     public AppConfig Clone()

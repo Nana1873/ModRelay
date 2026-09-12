@@ -36,9 +36,22 @@ public sealed class ConfigStore(string configFilePath)
                 var json = File.ReadAllText(FilePath);
                 var config = JsonSerializer.Deserialize<AppConfig>(json, Options);
                 if (config is not null)
-                    return WithDefaults(config, addDefaultWatchFolder: false);
+                {
+                    config = WithDefaults(config, addDefaultWatchFolder: false);
+                    if (LegacyAutoForwardWasDisabled(json))
+                    {
+                        BackupBeforeSimplification();
+                        config.WatchFolders = [];
+                        Log.Warn(
+                            "Legacy AutoForwardToPenumbra=false detected; watch folders were cleared " +
+                            "so a former conversion-only setup cannot begin forwarding automatically.");
+                    }
+
+                    return config;
+                }
 
                 Log.Warn($"Config at {FilePath} deserialised to null; using defaults.");
+                BackupBrokenFile();
             }
             catch (Exception ex)
             {
@@ -46,7 +59,9 @@ public sealed class ConfigStore(string configFilePath)
                 BackupBrokenFile();
             }
 
-            return WithDefaults(new AppConfig(), addDefaultWatchFolder: true);
+            // This is not a first launch: a settings file existed but could not be used.
+            // Keep watching disabled instead of silently switching to the Downloads folder.
+            return WithDefaults(new AppConfig(), addDefaultWatchFolder: false);
         }
     }
 
@@ -101,6 +116,32 @@ public sealed class ConfigStore(string configFilePath)
 
         var downloads = Path.Combine(profile, "Downloads");
         return Directory.Exists(downloads) ? downloads : null;
+    }
+
+    private static bool LegacyAutoForwardWasDisabled(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.ValueKind == JsonValueKind.Object &&
+               document.RootElement.TryGetProperty("AutoForwardToPenumbra", out var value) &&
+               value.ValueKind == JsonValueKind.False;
+    }
+
+    private void BackupBeforeSimplification()
+    {
+        var backup = FilePath + ".before-simplification";
+        try
+        {
+            File.Copy(FilePath, backup, overwrite: false);
+            Log.Info($"Settings before simplification copied to {backup}");
+        }
+        catch (IOException) when (File.Exists(backup))
+        {
+            Log.Info($"Existing settings backup preserved at {backup}");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("Could not back up settings before simplification.", ex);
+        }
     }
 
     private void BackupBrokenFile()

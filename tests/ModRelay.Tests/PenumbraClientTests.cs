@@ -43,6 +43,25 @@ public sealed class PenumbraClientTests
         Assert.Equal("submitted", result.ModName);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InterruptedPost_DoesNotReportSafeToRetryUnavailability(bool callerCancels)
+    {
+        using var temp = new TestDirectory();
+        var package = temp.File("uncertain.pmp");
+        File.WriteAllText(package, "package");
+        using var cancellation = new CancellationTokenSource();
+        using var http = new HttpClient(new InterruptedPostHandler(callerCancels ? cancellation : null));
+        var client = new PenumbraClient(http, () => new AppConfig());
+
+        var result = await client.InstallAsync(package, cancellation.Token);
+
+        Assert.Equal(InstallOutcome.Failed, result.Outcome);
+        Assert.Contains("Check uncertain in Penumbra", result.Message);
+        Assert.True(File.Exists(package));
+    }
+
     [Fact]
     public async Task MalformedPenumbraResponse_IsTreatedAsUnavailableInsteadOfCrashing()
     {
@@ -98,5 +117,22 @@ public sealed class PenumbraClientTests
             {
                 Content = new StringContent(body, Encoding.UTF8, "application/json")
             });
+    }
+
+    private sealed class InterruptedPostHandler(CancellationTokenSource? callerCancellation) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                callerCancellation?.Cancel();
+                throw new OperationCanceledException("The response timed out after submission.");
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}")
+            });
+        }
     }
 }

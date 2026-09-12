@@ -1,17 +1,20 @@
+using System.Collections.Concurrent;
 using System.Runtime.Versioning;
 using System.Threading.Channels;
 
 namespace ModRelay.Core;
 
-/// <summary>
-/// One file at a time: unpack -> upgrade to Dawntrail -> hand to Penumbra -> clean up.
-/// Serial by design; two ConsoleTools runs at once just fight over the same disk.
-/// </summary>
+public sealed record PipelineState(int QueuedCount, int PendingCount, bool IsBusy, bool CanCancel, string? CurrentFile)
+{
+    public int ReviewCount { get; init; }
+    public bool SavePending { get; init; }
+}
+
+/// <summary>Processes durable source jobs serially, retaining package-level handoff progress.</summary>
 [SupportedOSPlatform("windows")]
 public sealed class ModPipeline : IDisposable
 {
     private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(30);
-
     private readonly Func<AppConfig> _config;
     private readonly ArchiveExtractor _extractor;
     private readonly TexToolsUpgrader _upgrader;
@@ -19,408 +22,443 @@ public sealed class ModPipeline : IDisposable
     private readonly PendingQueue _pending;
     private readonly IUserInteraction _ui;
     private readonly Action<string> _ignoreGeneratedFile;
-
-    private readonly Channel<string> _queue = Channel.CreateUnbounded<string>(
+    private readonly Channel<QueuedWork> _queue = Channel.CreateUnbounded<QueuedWork>(
         new UnboundedChannelOptions { SingleReader = true });
-
+    private readonly ConcurrentDictionary<Guid, byte> _scheduled = new();
     private readonly CancellationTokenSource _shutdown = new();
+    private readonly object _currentGate = new();
     private Task? _worker;
-    private Task? _retryTask;
     private Timer? _retryTimer;
-    private int _activeOperations;
-    private int _retryRunning;
+    private int _retryQueued;
+    private Guid? _currentId;
+    private int _currentIndex = -1;
+    private string? _currentFile;
+    private CancellationTokenSource? _currentCancellation;
+    private bool _userCancelled;
+    private bool _canCancel;
 
-    public ModPipeline(
-        Func<AppConfig> configProvider,
-        ArchiveExtractor extractor,
-        TexToolsUpgrader upgrader,
-        PenumbraClient penumbra,
-        PendingQueue pending,
-        IUserInteraction ui,
-        Action<string>? ignoreGeneratedFile = null)
+    public ModPipeline(Func<AppConfig> configProvider, ArchiveExtractor extractor, TexToolsUpgrader upgrader,
+        PenumbraClient penumbra, PendingQueue pending, IUserInteraction ui, Action<string>? ignoreGeneratedFile = null)
     {
-        _config = configProvider;
-        _extractor = extractor;
-        _upgrader = upgrader;
-        _penumbra = penumbra;
-        _pending = pending;
-        _ui = ui;
+        _config = configProvider; _extractor = extractor; _upgrader = upgrader;
+        _penumbra = penumbra; _pending = pending; _ui = ui;
         _ignoreGeneratedFile = ignoreGeneratedFile ?? (_ => { });
+    }
+
+    public event Action<PipelineState>? StateChanged;
+
+    public PipelineState State
+    {
+        get
+        {
+            Guid? currentId;
+            int currentIndex;
+            string? currentFile;
+            bool canCancel;
+            lock (_currentGate)
+            {
+                currentId = _currentId; currentIndex = _currentIndex;
+                currentFile = _currentFile; canCancel = _canCancel && !_userCancelled;
+            }
+            var queued = 0;
+            var offline = 0;
+            var review = 0;
+            foreach (var job in _pending.SnapshotJobs())
+            {
+                if (job.ReviewReason is not null) { review++; continue; }
+                if (job.Packages is null)
+                {
+                    if (job.Id != currentId) queued++;
+                    continue;
+                }
+                for (var index = 0; index < job.Packages.Count; index++)
+                {
+                    var stage = job.Packages[index].Stage;
+                    if (stage == PackageStage.Review) { review++; continue; }
+                    if (stage is PackageStage.Completed or PackageStage.Skipped ||
+                        (job.Id == currentId && index == currentIndex)) continue;
+                    queued++;
+                    if (stage == PackageStage.Offline) offline++;
+                }
+            }
+            return new PipelineState(queued, offline, currentId is not null, canCancel, currentFile)
+            {
+                ReviewCount = review,
+                SavePending = _pending.NeedsPersistence
+            };
+        }
     }
 
     public void Start()
     {
-        if (!_pending.Load() && _config().ShowErrorNotifications)
-            _ui.Notify("Retry queue could not be read",
-                "The damaged queue was backed up. Previously queued mods need to be submitted again.", isError: true);
-        _worker ??= Task.Run(() => RunAsync(_shutdown.Token));
-        _retryTimer ??= new Timer(_ => RetryPending(), null, RetryInterval, RetryInterval);
+        if (_worker is not null) return;
+        if (!_pending.Load())
+            NotifyError("Queue could not be read", "The damaged journal was backed up. Submit missing mods again.");
+        var review = State.ReviewCount;
+        if (review > 0)
+            NotifyError("Some mods need your attention",
+                $"{review} retained job(s) need checking before resubmission. An interrupted handoff may already be in Penumbra; an interrupted upgrade may be incomplete.");
+        _worker = Task.Run(() => RunAsync(_shutdown.Token));
+        foreach (var job in _pending.SnapshotJobs().Where(HasImmediateWork)) Schedule(job.Id, retryOffline: false);
+        _retryTimer = new Timer(_ => RetryPending(), null, RetryInterval, RetryInterval);
+        RetryPending();
+        PublishState();
     }
 
-    public void Enqueue(string path) => _queue.Writer.TryWrite(path);
-
-    private async Task RunAsync(CancellationToken cancellationToken)
+    /// <summary>Writes the source job before it can begin processing.</summary>
+    public void Enqueue(string path)
     {
-        await foreach (var path in _queue.Reader.ReadAllAsync(cancellationToken))
+        if (_shutdown.IsCancellationRequested) return;
+        if (!_pending.AddIncoming(Path.GetFullPath(path), out var id))
         {
-            BeginOperation();
-            try
-            {
-                await ProcessAsync(path, cancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                Log.Error($"Processing {path} failed.", ex);
-                if (_config().ShowErrorNotifications)
-                    _ui.Notify("Processing failed", $"{Path.GetFileName(path)} could not be processed.", isError: true);
-            }
-            finally
-            {
-                EndOperation();
-            }
-        }
-    }
-
-    internal async Task ProcessAsync(string path, CancellationToken cancellationToken)
-    {
-        if (!File.Exists(path))
-            return;
-
-        if (ModFileTypes.IsArchive(path))
-        {
-            await ProcessArchiveAsync(path, cancellationToken);
+            NotifyPersistenceFailure();
+            PublishState();
             return;
         }
-
-        await ProcessModFileAsync(path, cancellationToken);
+        Schedule(id, retryOffline: true);
+        PublishState();
     }
 
-    private async Task ProcessArchiveAsync(string archivePath, CancellationToken cancellationToken)
+    /// <summary>Cancels only the active source or selected archive batch, before handoff.</summary>
+    public void CancelCurrent()
     {
-        var name = Path.GetFileName(archivePath);
-        _ui.Status($"Inspecting {name}");
+        lock (_currentGate)
+        {
+            if (!_canCancel || _currentCancellation is null || _userCancelled) return;
+            _userCancelled = true;
+            _currentCancellation.Cancel();
+        }
+        PublishState();
+    }
 
-        IReadOnlyList<ArchiveEntryInfo> entries;
+    private void Schedule(Guid id, bool retryOffline)
+    {
+        if (_scheduled.TryAdd(id, 0) && !_queue.Writer.TryWrite(new QueuedWork(id, retryOffline)))
+            _scheduled.TryRemove(id, out _);
+    }
+
+    private async Task RunAsync(CancellationToken shutdown)
+    {
         try
         {
-            entries = _extractor.Inspect(archivePath);
+            await foreach (var work in _queue.Reader.ReadAllAsync(shutdown))
+            {
+                if (work.Id == Guid.Empty)
+                {
+                    try { await ScheduleRetriesAsync(shutdown); }
+                    finally { Interlocked.Exchange(ref _retryQueued, 0); }
+                    continue;
+                }
+                try { await RunJobAsync(work.Id, work.RetryOffline, shutdown); }
+                finally { _scheduled.TryRemove(work.Id, out _); }
+            }
         }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { }
+    }
+
+    private async Task RunJobAsync(Guid id, bool retryOffline, CancellationToken shutdown)
+    {
+        var job = _pending.Get(id);
+        if (job is null || job.ReviewReason is not null) return;
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
+        lock (_currentGate)
+        {
+            _currentId = id; _currentIndex = -1; _currentFile = Path.GetFileName(job.SourcePath);
+            _currentCancellation = cancellation; _userCancelled = false; _canCancel = true;
+        }
+        PublishState();
+        try
+        {
+            RequireSaved(_pending.Flush());
+            await ProcessJobAsync(id, retryOffline, cancellation.Token);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            bool userCancelled;
+            lock (_currentGate) userCancelled = _userCancelled;
+            if (userCancelled && !_pending.Cancel(id)) NotifyCancellationPersistenceFailure();
+            else if (!userCancelled)
+            {
+                // A gracefully stopped converter has removed its unfinished output.
+                // Such work is safe to resume; a surviving output still needs review.
+                if (!_pending.Update(id, item =>
+                {
+                    foreach (var package in item.Packages ?? [])
+                        if (package.Stage == PackageStage.Upgrading && !File.Exists(package.UpgradeTarget))
+                        {
+                            package.Stage = PackageStage.Preparing;
+                            package.UpgradeTarget = null;
+                        }
+                })) NotifyPersistenceFailure();
+            }
+            Log.Info(userCancelled ? $"Cancelled {job.SourcePath}; sources were kept." : $"Paused {job.SourcePath} for shutdown.");
+        }
+        catch (QueuePersistenceException) { NotifyPersistenceFailure(); }
         catch (Exception ex)
         {
-            Log.Warn($"{archivePath} is not a readable archive; leaving it alone.", ex);
-            if (_config().ShowErrorNotifications)
-                _ui.Notify("Archive could not be read",
-                    $"{name} is damaged, incomplete, or uses an unsupported archive format.", isError: true);
-            return;
+            Log.Error($"Processing {job.SourcePath} failed.", ex);
+            _pending.Update(id, item => item.ReviewReason = ex.Message);
+            NotifyError("Processing failed", $"{Path.GetFileName(job.SourcePath)}\n{ex.Message}");
         }
-
-        if (entries.Count == 0)
+        finally
         {
-            Log.Info($"No mod files inside {name}; leaving it alone.");
+            lock (_currentGate)
+            {
+                _currentId = null; _currentIndex = -1; _currentFile = null;
+                _currentCancellation = null; _canCancel = false;
+            }
+            _ui.Status("Ready");
+            PublishState();
+        }
+    }
+
+    // Direct execution is useful for bounded integration tests; it uses the same journal.
+    internal async Task ProcessAsync(string path, CancellationToken cancellationToken)
+    {
+        if (!_pending.AddIncoming(Path.GetFullPath(path), out var id))
+        {
+            NotifyPersistenceFailure();
             return;
         }
+        await RunJobAsync(id, retryOffline: true, cancellationToken);
+    }
 
-        var config = _config();
+    private async Task ProcessJobAsync(Guid id, bool retryOffline, CancellationToken cancellationToken)
+    {
+        var job = _pending.Get(id);
+        if (job is null) return;
+        if (job.Packages is null)
+            await ExpandArchiveAsync(job, cancellationToken);
 
-        // Pre-Dawntrail files are never filtered out here - they are exactly the ones
-        // the TexTools upgrade exists for.
-        var selected = config.ExtractAllMods || entries.Count == 1
-            ? entries.Select(e => e.Key).ToList()
-            : [.. await _ui.SelectArchiveEntriesAsync(archivePath, entries)];
+        for (var index = 0; ; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            job = _pending.Get(id);
+            if (job?.Packages is null || index >= job.Packages.Count) return;
+            var package = job.Packages[index];
+            if (package.Stage is PackageStage.Completed or PackageStage.Skipped or PackageStage.Review ||
+                (package.Stage == PackageStage.Offline && !retryOffline)) continue;
+            lock (_currentGate) { _currentIndex = index; _currentFile = Path.GetFileName(package.Path); }
+            PublishState();
+            if (package.Stage is PackageStage.Sending or PackageStage.Upgrading)
+            {
+                SavePackage(id, index, item =>
+                {
+                    item.Stage = PackageStage.Review;
+                    item.ReviewReason = "An external operation was interrupted. Check the retained files and Penumbra before resubmitting.";
+                });
+                continue;
+            }
+            if (!File.Exists(package.Path))
+            {
+                SavePackage(id, index, item => { item.Stage = PackageStage.Review; item.ReviewReason = "The source file is unavailable."; });
+                NotifyError("Source file is unavailable", package.Path);
+                continue;
+            }
+            await PreparePackageAsync(id, index, package, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            package = _pending.Get(id)?.Packages?[index];
+            if (package?.Stage is PackageStage.Ready or PackageStage.Offline)
+                await InstallAsync(id, index, package.Path, cancellationToken);
+        }
+    }
 
+    private async Task ExpandArchiveAsync(PendingJob job, CancellationToken cancellationToken)
+    {
+        var name = Path.GetFileName(job.SourcePath);
+        _ui.Status($"Inspecting {name}");
+        IReadOnlyList<ArchiveEntryInfo> entries;
+        try { entries = _extractor.Inspect(job.SourcePath); }
+        catch (Exception ex)
+        {
+            RequireSaved(_pending.Update(job.Id, item => item.ReviewReason = "The archive could not be read."));
+            NotifyError("Archive could not be read", $"{name} is damaged, incomplete, or uses an unsupported archive format.");
+            Log.Warn($"Could not inspect {job.SourcePath}.", ex);
+            return;
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        var selected = job.SelectedEntries ?? (_config().ExtractAllMods || entries.Count <= 1
+            ? entries.Select(entry => entry.Key).ToList()
+            : [.. await _ui.SelectArchiveEntriesAsync(job.SourcePath, entries, cancellationToken).WaitAsync(cancellationToken)]);
+        cancellationToken.ThrowIfCancellationRequested();
         if (selected.Count == 0)
         {
-            Log.Info($"Nothing selected from {name}.");
+            RequireSaved(_pending.Cancel(job.Id));
             return;
         }
-
+        RequireSaved(_pending.Update(job.Id, item => item.SelectedEntries = selected));
         _ui.Status($"Extracting {name}");
         await _ui.BeginArchiveProgressAsync(name, $"Preparing to extract {selected.Count} selected mod(s)…");
-
-        var destination = Path.Combine(
-            Path.GetDirectoryName(archivePath)!,
-            Path.GetFileNameWithoutExtension(archivePath));
-
         IReadOnlyList<string> extracted;
         var currentEntry = 0;
         try
         {
-            extracted = _extractor.Extract(
-                archivePath, selected, destination,
+            var destination = Path.Combine(Path.GetDirectoryName(job.SourcePath)!, Path.GetFileNameWithoutExtension(job.SourcePath));
+            extracted = _extractor.Extract(job.SourcePath, selected, destination,
                 new InlineProgress<string>(message =>
                 {
-                    var current = Interlocked.Increment(ref currentEntry);
                     _ui.Status(message);
-                    _ui.UpdateArchiveProgress($"{current} of {selected.Count} — {message}");
-                }), cancellationToken);
+                    _ui.UpdateArchiveProgress($"{++currentEntry} of {selected.Count} — {message}");
+                }), cancellationToken, onOutputCreated: _ignoreGeneratedFile);
+            // No package may be sent until the entire expansion is durably recorded.
+            RequireSaved(_pending.Update(job.Id, item =>
+            {
+                item.Packages = extracted.Select(path => new PendingPackage { Path = path, Stage = PackageStage.Preparing }).ToList();
+                item.SelectedEntries = null;
+            }));
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
         {
-            Log.Warn($"Extraction of {archivePath} was stopped; the archive was kept.", ex);
-            if (_config().ShowErrorNotifications)
-                _ui.Notify("Archive extraction stopped", ex.Message, isError: true);
-            return;
+            RequireSaved(_pending.Update(job.Id, item => item.ReviewReason = ex.Message));
+            NotifyError("Archive extraction stopped", ex.Message);
         }
-        finally
-        {
-            await _ui.EndArchiveProgressAsync();
-        }
-
-        foreach (var generatedFile in extracted)
-            _ignoreGeneratedFile(generatedFile);
-
-        if (config.AutoDeleteMods)
-            TryDelete(archivePath);
-
-        foreach (var modFile in extracted)
-            await ProcessModFileAsync(modFile, cancellationToken);
+        finally { await _ui.EndArchiveProgressAsync(); }
     }
 
-    private async Task ProcessModFileAsync(string modPath, CancellationToken cancellationToken)
+    private async Task PreparePackageAsync(Guid id, int index, PendingPackage package, CancellationToken cancellationToken)
     {
-        var config = _config();
-
-        var pathToInstall = await UpgradeIfWantedAsync(modPath, config, cancellationToken);
-        if (pathToInstall is null)
-            return;
-
-        if (!config.AutoForwardToPenumbra)
+        if (package.Stage == PackageStage.Preparing)
         {
-            Log.Info($"Auto-forward is off; {pathToInstall} stays where it is.");
-            if (config.ShowNotifications)
-                _ui.Notify("Mod ready", Path.GetFileName(pathToInstall));
-            return;
+            var config = _config();
+            if (!config.AutoUpgradeToDawntrail || !CanUpgradeWithTexTools(package.Path))
+                SavePackage(id, index, item => item.Stage = PackageStage.Ready);
+            else if (string.IsNullOrWhiteSpace(config.TexToolsConsolePath) || !File.Exists(config.TexToolsConsolePath))
+            {
+                if (!ModFileTypes.LooksPreDawntrail(Path.GetFileName(package.Path)))
+                    SavePackage(id, index, item => item.Stage = PackageStage.Ready);
+                else
+                    SaveUpgradeFailure(id, index, new UpgradeResult(UpgradeStatus.ToolMissing, null, -1, string.Empty));
+            }
+            else
+            {
+                var target = UniqueGeneratedPath(Path.Combine(Path.GetDirectoryName(package.Path)!,
+                    Path.GetFileNameWithoutExtension(package.Path) + "_dt.ttmp2"));
+                _ignoreGeneratedFile(target);
+                RequireSaved(_pending.PrepareExternalOperation(id, index,
+                    item => { item.Stage = PackageStage.Upgrading; item.UpgradeTarget = target; }));
+                _ui.Status($"Upgrading {Path.GetFileName(package.Path)} … (this may take a few minutes)");
+                var result = await _upgrader.UpgradeAsync(config.TexToolsConsolePath, package.Path, target, cancellationToken);
+                if (result.Status == UpgradeStatus.Upgraded)
+                {
+                    _ignoreGeneratedFile(result.OutputPath!);
+                    SavePackage(id, index, item =>
+                    {
+                        item.Path = result.OutputPath!; item.Stage = PackageStage.Ready; item.UpgradeTarget = null;
+                    });
+                }
+                else if (result.Status == UpgradeStatus.NotNeeded)
+                    SavePackage(id, index, item => { item.Stage = PackageStage.Ready; item.UpgradeTarget = null; });
+                else SaveUpgradeFailure(id, index, result);
+            }
         }
-
-        await InstallAsync(pathToInstall, config, cancellationToken);
+        package = _pending.Get(id)?.Packages?[index]!;
+        if (package?.Stage != PackageStage.AwaitingDecision) return;
+        var install = await _ui.ConfirmInstallWithoutUpgradeAsync(Path.GetFileName(package.Path),
+            package.UpgradeFailure!, cancellationToken).WaitAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        SavePackage(id, index, item => item.Stage = install ? PackageStage.Ready : PackageStage.Skipped);
     }
 
-    /// <summary>
-    /// Returns the path to install, or null when the user decided against installing
-    /// an un-upgraded mod.
-    /// </summary>
-    private async Task<string?> UpgradeIfWantedAsync(string modPath, AppConfig config, CancellationToken cancellationToken)
+    private void SaveUpgradeFailure(Guid id, int index, UpgradeResult result) => SavePackage(id, index, item =>
     {
-        if (!config.AutoUpgradeToDawntrail || !CanUpgradeWithTexTools(modPath))
-            return modPath;
+        item.Stage = PackageStage.AwaitingDecision; item.UpgradeTarget = null;
+        item.UpgradeFailure = result with { Output = string.Empty, OutputPath = null };
+    });
 
-        var fileName = Path.GetFileName(modPath);
-
-        if (string.IsNullOrWhiteSpace(config.TexToolsConsolePath) || !File.Exists(config.TexToolsConsolePath))
-        {
-            // Only worth bothering the user about when the mod actually looks like it needs it.
-            if (!ModFileTypes.LooksPreDawntrail(fileName))
-                return modPath;
-
-            var missing = new UpgradeResult(UpgradeStatus.ToolMissing, null, -1, string.Empty);
-            return await HandleFailedUpgradeAsync(modPath, fileName, missing, config);
-        }
-
-        _ui.Status($"Upgrading {fileName} … (this may take a few minutes)");
-
-        var target = UniqueGeneratedPath(Path.Combine(
-            Path.GetDirectoryName(modPath)!,
-            Path.GetFileNameWithoutExtension(modPath) + "_dt.ttmp2"));
-
-        _ignoreGeneratedFile(target);
-
-        var result = await _upgrader.UpgradeAsync(config.TexToolsConsolePath, modPath, target, cancellationToken);
-
-        switch (result.Status)
-        {
-            case UpgradeStatus.Upgraded:
-                _ignoreGeneratedFile(result.OutputPath!);
-                if (config.ShowNotifications)
-                    _ui.Notify("Updated for Dawntrail", fileName);
-
-                if (config.AutoDeleteMods)
-                    TryDelete(modPath);
-
-                return result.OutputPath;
-
-            case UpgradeStatus.NotNeeded:
-                Log.Info($"{fileName} needs no upgrade.");
-                return modPath;
-
-            default:
-                return await HandleFailedUpgradeAsync(modPath, fileName, result, config);
-        }
-    }
-
-    private static bool CanUpgradeWithTexTools(string path) =>
-        Path.GetExtension(path) is var extension &&
-        (extension.Equals(".ttmp", StringComparison.OrdinalIgnoreCase) ||
-         extension.Equals(".ttmp2", StringComparison.OrdinalIgnoreCase));
-
-    private async Task<string?> HandleFailedUpgradeAsync(
-        string modPath, string fileName, UpgradeResult result, AppConfig config)
+    private async Task InstallAsync(Guid id, int index, string path, CancellationToken cancellationToken)
     {
-        if (config.InstallOriginalWhenUpgradeFails)
+        _ui.Status($"Sending {Path.GetFileName(path)} to Penumbra");
+        InstallResult result;
+        try
         {
-            Log.Warn($"Upgrade of {fileName} failed ({result.Status}); installing the original as configured.");
-            return modPath;
+            result = await _penumbra.InstallAsync(path, cancellationToken, beforeSend: () =>
+            {
+                lock (_currentGate)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    _canCancel = false;
+                }
+                // Persist before the side effect. A crash after this point becomes a review hold.
+                RequireSaved(_pending.PrepareExternalOperation(id, index, item => item.Stage = PackageStage.Sending));
+            });
         }
-
-        var install = await _ui.ConfirmInstallWithoutUpgradeAsync(fileName, result);
-
-        if (install)
-            return modPath;
-
-        Log.Info($"{fileName} was not installed - upgrade failed and the user declined.");
-        if (config.ShowErrorNotifications)
-            _ui.Notify("Not installed", $"{fileName} was not imported.", isError: true);
-        return null;
-    }
-
-    private async Task InstallAsync(string modPath, AppConfig config, CancellationToken cancellationToken)
-    {
-        _ui.Status($"Sending {Path.GetFileName(modPath)} to Penumbra");
-
-        var result = await _penumbra.InstallAsync(modPath, cancellationToken);
-
+        finally { lock (_currentGate) _canCancel = true; PublishState(); }
         switch (result.Outcome)
         {
-            case InstallOutcome.Imported:
-                if (config.ShowNotifications)
-                    _ui.Notify("Mod imported", result.ModName);
-
-                RemoveFromPending(modPath, config);
-
-                if (config.AutoDeleteMods)
-                    TryDelete(modPath);
-                break;
-
             case InstallOutcome.Accepted:
-                RemoveFromPending(modPath, config);
-                if (config.ShowErrorNotifications)
-                    _ui.Notify("Import accepted",
-                        $"{result.ModName} was queued by Penumbra. Verify it in Penumbra before deleting the retained source file.");
+                SavePackage(id, index, item => item.Stage = PackageStage.Completed);
                 break;
-
             case InstallOutcome.PenumbraUnreachable:
-                var queueSaved = _pending.Add(modPath);
-                if (config.ShowErrorNotifications)
-                    _ui.Notify(queueSaved ? "Penumbra is unavailable" : "Retry queue could not be saved",
-                        queueSaved
-                            ? $"{result.ModName} will be installed as soon as Penumbra is available."
-                            : $"Keep ModRelay running or submit {result.ModName} again later; its retry could not be persisted.",
-                        isError: !queueSaved);
+                var wasEmpty = _pending.Count == 0;
+                SavePackage(id, index, item => item.Stage = PackageStage.Offline);
+                if (wasEmpty && _config().ShowErrorNotifications)
+                    _ui.Notify("Penumbra is unavailable", "Your mods will be sent automatically when Penumbra is available.");
                 break;
-
             default:
-                if (config.ShowErrorNotifications)
-                    _ui.Notify("Import failed", result.Message ?? result.ModName, isError: true);
+                SavePackage(id, index, item => { item.Stage = PackageStage.Review; item.ReviewReason = result.Message; });
+                NotifyError("Import failed", result.Message is null ? result.ModName : $"{result.ModName}\n{result.Message}");
                 break;
         }
     }
 
-    private void RemoveFromPending(string modPath, AppConfig config)
+    private void SavePackage(Guid id, int index, Action<PendingPackage> update) => RequireSaved(_pending.UpdatePackage(id, index, update));
+    private void RequireSaved(bool saved) { PublishState(); if (!saved) throw new QueuePersistenceException(); }
+    private void NotifyPersistenceFailure() => NotifyError("Queue could not be saved",
+        "Processing is paused until ModRelay can save its data folder. Keep the app running or submit the retained files again later.");
+    private void NotifyCancellationPersistenceFailure()
     {
-        if (_pending.Remove(modPath) || !config.ShowErrorNotifications)
-            return;
-
-        _ui.Notify(
-            "Retry queue could not be updated",
-            $"{Path.GetFileName(modPath)} was processed, but its retry entry could not be removed. " +
-            "Keep ModRelay running and restore write access to its data folder before restarting.",
-            isError: true);
+        const string message = "The cancellation could not be saved. Keep ModRelay running until storage recovers; restarting before it is saved may resume this job.";
+        Log.Warn(message);
+        NotifyError("Cancellation could not be saved", message);
+    }
+    private void NotifyError(string title, string message)
+    {
+        if (_config().ShowErrorNotifications) _ui.Notify(title, message, isError: true);
     }
 
-    private void RetryPending()
+    internal void RetryPending()
     {
-        if ((_pending.Count == 0 && !_pending.NeedsPersistence) || _shutdown.IsCancellationRequested ||
-            Interlocked.CompareExchange(ref _retryRunning, 1, 0) != 0)
-            return;
-
-        _retryTask = Task.Run(async () =>
-        {
-            BeginOperation();
-            try
-            {
-                _pending.Flush();
-                if (_pending.Count == 0)
-                    return;
-
-                if (!await _penumbra.IsReachableAsync(_shutdown.Token))
-                    return;
-
-                foreach (var path in _pending.Snapshot())
-                {
-                    if (!File.Exists(path))
-                    {
-                        _pending.Remove(path);
-                        continue;
-                    }
-
-                    Log.Info($"Penumbra is back; retrying {path}");
-                    await InstallAsync(path, _config(), _shutdown.Token);
-                }
-            }
-            finally
-            {
-                EndOperation();
-                Interlocked.Exchange(ref _retryRunning, 0);
-            }
-        }, _shutdown.Token);
+        if (_shutdown.IsCancellationRequested || Interlocked.CompareExchange(ref _retryQueued, 1, 0) != 0) return;
+        if (!_queue.Writer.TryWrite(new QueuedWork(Guid.Empty, false))) Interlocked.Exchange(ref _retryQueued, 0);
     }
 
-    private void BeginOperation() => Interlocked.Increment(ref _activeOperations);
-
-    private void EndOperation()
+    private async Task ScheduleRetriesAsync(CancellationToken cancellationToken)
     {
-        if (Interlocked.Decrement(ref _activeOperations) == 0)
-            _ui.Status("Ready");
+        if (!_pending.Flush()) return;
+        var jobs = _pending.SnapshotJobs();
+        var retryOffline = jobs.Any(job => job.Packages?.Any(package => package.Stage == PackageStage.Offline) == true) &&
+            await _penumbra.IsReachableAsync(cancellationToken);
+        foreach (var job in jobs)
+            if (HasImmediateWork(job) || (retryOffline && job.ReviewReason is null &&
+                job.Packages?.Any(package => package.Stage == PackageStage.Offline) == true))
+                Schedule(job.Id, retryOffline);
+        PublishState();
     }
+
+    private static bool HasImmediateWork(PendingJob job) => job.ReviewReason is null &&
+        (job.Packages is null || job.Packages.Any(package => package.Stage is
+            PackageStage.Preparing or PackageStage.Ready or PackageStage.AwaitingDecision));
+
+    private void PublishState()
+    {
+        try { StateChanged?.Invoke(State); }
+        catch (Exception ex) { Log.Warn("Could not update the displayed queue state.", ex); }
+    }
+
+    private static bool CanUpgradeWithTexTools(string path) => Path.GetExtension(path) is var extension &&
+        (extension.Equals(".ttmp", StringComparison.OrdinalIgnoreCase) || extension.Equals(".ttmp2", StringComparison.OrdinalIgnoreCase));
 
     private static string UniqueGeneratedPath(string path)
     {
-        if (!File.Exists(path))
-            return path;
-
+        if (!File.Exists(path)) return path;
         var directory = Path.GetDirectoryName(path)!;
         var name = Path.GetFileNameWithoutExtension(path);
         var extension = Path.GetExtension(path);
         for (var suffix = 2; ; suffix++)
         {
             var candidate = Path.Combine(directory, $"{name} ({suffix}){extension}");
-            if (!File.Exists(candidate))
-                return candidate;
+            if (!File.Exists(candidate)) return candidate;
         }
-    }
-
-    /// <summary>
-    /// Deleting right after a write often hits a lock from an antivirus scanner or the
-    /// search indexer, so give it a few tries before giving up.
-    /// </summary>
-    private static void TryDelete(string path, int attempts = 4)
-    {
-        for (var attempt = 1; attempt <= attempts; attempt++)
-        {
-            try
-            {
-                if (!File.Exists(path))
-                    return;
-
-                File.Delete(path);
-                Log.Info($"Deleted {path}");
-                return;
-            }
-            catch (IOException) when (attempt < attempts)
-            {
-                Thread.Sleep(500 * attempt);
-            }
-            catch (Exception ex)
-            {
-                Log.Warn($"Could not delete {path}; leaving it in place.", ex);
-                return;
-            }
-        }
-
-        Log.Warn($"Could not delete {path} after {attempts} attempts; leaving it in place.");
     }
 
     public void Dispose()
@@ -428,22 +466,15 @@ public sealed class ModPipeline : IDisposable
         _shutdown.Cancel();
         _queue.Writer.TryComplete();
         _retryTimer?.Dispose();
-        WaitForShutdown(_worker);
-        WaitForShutdown(_retryTask);
-        _shutdown.Dispose();
+        if (_worker is not null && Task.CurrentId != _worker.Id)
+        {
+            try { _worker.Wait(TimeSpan.FromSeconds(5)); }
+            catch (AggregateException ex) when (ex.InnerExceptions.All(error => error is OperationCanceledException)) { }
+        }
+        if (_worker is null || _worker.IsCompleted) _shutdown.Dispose();
     }
 
-    private static void WaitForShutdown(Task? task)
-    {
-        if (task is null || task.IsCompleted || Task.CurrentId == task.Id)
-            return;
-
-        try { task.Wait(TimeSpan.FromSeconds(2)); }
-        catch (AggregateException ex) when (ex.InnerExceptions.All(e => e is OperationCanceledException)) { }
-    }
-
-    private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
-    {
-        public void Report(T value) => report(value);
-    }
+    private sealed class QueuePersistenceException : Exception;
+    private sealed class InlineProgress<T>(Action<T> report) : IProgress<T> { public void Report(T value) => report(value); }
+    private readonly record struct QueuedWork(Guid Id, bool RetryOffline);
 }

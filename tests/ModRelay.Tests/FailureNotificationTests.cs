@@ -25,7 +25,7 @@ public sealed class FailureNotificationTests
     }
 
     [Fact]
-    public async Task RejectedImport_ShowsErrorEvenWhenSuccessNotificationsAreDisabled()
+    public async Task RejectedImport_ShowsErrorAndKeepsSource()
     {
         using var temp = new TestDirectory();
         var package = temp.File("rejected.pmp");
@@ -39,6 +39,8 @@ public sealed class FailureNotificationTests
 
         var notification = Assert.Single(ui.Notifications);
         Assert.Equal("Import failed", notification.Title);
+        Assert.Contains("rejected", notification.Message);
+        Assert.Contains("500", notification.Message);
         Assert.True(notification.IsError);
         Assert.True(File.Exists(package));
     }
@@ -64,6 +66,29 @@ public sealed class FailureNotificationTests
     }
 
     [Fact]
+    public async Task MultipleOfflineDownloads_ShowOneNoticeAndKeepEveryPackageQueued()
+    {
+        using var temp = new TestDirectory();
+        var first = temp.File("first.pmp");
+        var second = temp.File("second.pmp");
+        File.WriteAllText(first, "first");
+        File.WriteAllText(second, "second");
+        var ui = new RecordingInteraction();
+        var pending = new PendingQueue(temp.File("pending.json"));
+        using var pipeline = CreatePipeline(temp, ui, new ResponseHandler(
+            get: () => throw new HttpRequestException("offline"),
+            post: () => throw new InvalidOperationException()), pending);
+
+        await pipeline.ProcessAsync(first, CancellationToken.None);
+        await pipeline.ProcessAsync(second, CancellationToken.None);
+
+        Assert.Equal("Penumbra is unavailable", Assert.Single(ui.Notifications).Title);
+        Assert.Equal(2, pending.Count);
+        Assert.True(File.Exists(first));
+        Assert.True(File.Exists(second));
+    }
+
+    [Fact]
     public async Task DamagedArchive_ShowsErrorAndKeepsArchive()
     {
         using var temp = new TestDirectory();
@@ -85,7 +110,7 @@ public sealed class FailureNotificationTests
     }
 
     [Fact]
-    public async Task AcceptedButUnconfirmedImport_ShowsWarningAndKeepsSource()
+    public async Task AcceptedImport_StaysSilentAndKeepsSource()
     {
         using var temp = new TestDirectory();
         var package = temp.File("slow.pmp");
@@ -97,15 +122,12 @@ public sealed class FailureNotificationTests
 
         await pipeline.ProcessAsync(package, CancellationToken.None);
 
-        var notification = Assert.Single(ui.Notifications);
-        Assert.Equal("Import accepted", notification.Title);
-        Assert.False(notification.IsError);
-        Assert.Contains("Verify it in Penumbra", notification.Message);
+        Assert.Empty(ui.Notifications);
         Assert.True(File.Exists(package));
     }
 
     [Fact]
-    public async Task AcceptedImport_ReportsWhenRetryQueueCannotBeUpdated()
+    public async Task UnsavedJob_DoesNotReachPenumbraAndReportsPersistenceFailure()
     {
         using var temp = new TestDirectory();
         var package = temp.File("queued.pmp");
@@ -122,8 +144,8 @@ public sealed class FailureNotificationTests
         await pipeline.ProcessAsync(package, CancellationToken.None);
 
         Assert.Contains(ui.Notifications, notification =>
-            notification.Title == "Retry queue could not be updated" && notification.IsError);
-        Assert.Equal(0, pending.Count);
+            notification.Title == "Queue could not be saved" && notification.IsError);
+        Assert.Equal(1, pending.Count);
     }
 
     private static ModPipeline CreatePipeline(
@@ -137,10 +159,7 @@ public sealed class FailureNotificationTests
         var config = new AppConfig
         {
             WatchFolders = [temp.Path],
-            ShowNotifications = false,
             ShowErrorNotifications = showErrorNotifications,
-            AutoDeleteMods = true,
-            AutoForwardToPenumbra = true,
             AutoUpgradeToDawntrail = false,
             PenumbraTimeoutSeconds = timeoutSeconds
         };
@@ -189,9 +208,9 @@ public sealed class FailureNotificationTests
 
         public Task<IReadOnlyList<string>> SelectArchiveEntriesAsync(
             string archivePath,
-            IReadOnlyList<ArchiveEntryInfo> entries) => Task.FromResult<IReadOnlyList<string>>([]);
+            IReadOnlyList<ArchiveEntryInfo> entries, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<string>>([]);
 
-        public Task<bool> ConfirmInstallWithoutUpgradeAsync(string fileName, UpgradeResult result) =>
+        public Task<bool> ConfirmInstallWithoutUpgradeAsync(string fileName, UpgradeResult result, CancellationToken cancellationToken = default) =>
             Task.FromResult(false);
 
         public void Notify(string title, string message, bool isError = false) =>

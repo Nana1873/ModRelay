@@ -73,9 +73,11 @@ public sealed class ArchiveExtractor
         IEnumerable<string> entryKeys,
         string destinationDirectory,
         IProgress<string>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action<string>? onOutputCreated = null)
     {
-        var wanted = new HashSet<string>(entryKeys, StringComparer.OrdinalIgnoreCase);
+        // Archive paths can differ only by case even on Windows.
+        var wanted = new HashSet<string>(entryKeys, StringComparer.Ordinal);
         var extracted = new List<string>();
         long extractedBytes = 0;
 
@@ -103,13 +105,17 @@ public sealed class ArchiveExtractor
                 var destination = UniquePath(Path.Combine(destinationDirectory, fileName));
                 progress?.Report($"Extracting {fileName}");
 
+                var ownsDestination = false;
                 try
                 {
                     using var input = entry.OpenEntryStream();
                     using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    ownsDestination = true;
+                    onOutputCreated?.Invoke(destination);
                     var buffer = new byte[CopyBufferSize];
                     while (true)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         var read = input.Read(buffer, 0, buffer.Length);
                         if (read == 0)
                             break;
@@ -126,7 +132,8 @@ public sealed class ArchiveExtractor
                 }
                 catch
                 {
-                    TryDelete(destination);
+                    if (ownsDestination)
+                        TryDelete(destination);
                     throw;
                 }
 
