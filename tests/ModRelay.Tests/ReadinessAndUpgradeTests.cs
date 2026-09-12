@@ -95,14 +95,24 @@ public sealed class ReadinessAndUpgradeTests
         using var cancellation = new CancellationTokenSource();
 
         var upgrade = upgrader.UpgradeAsync(syntheticConsoleTools, source, target, cancellation.Token);
-        await WaitForFileAsync(ready, upgrade);
-        cancellation.Cancel();
+        try
+        {
+            await WaitForFileAsync(ready, upgrade);
+            cancellation.Cancel();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => upgrade);
-        await exited.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.Equal(["/upgrade", source, target], receivedArguments);
-        Assert.Equal("original source", File.ReadAllText(source));
-        Assert.False(File.Exists(target));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => upgrade.WaitAsync(TimeSpan.FromSeconds(7)));
+            await exited.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(["/upgrade", source, target], receivedArguments);
+            Assert.Equal("original source", File.ReadAllText(source));
+            Assert.False(File.Exists(target));
+        }
+        finally
+        {
+            // A readiness timeout must not leave the test-owned process running.
+            cancellation.Cancel();
+            try { await upgrade.WaitAsync(TimeSpan.FromSeconds(7)); }
+            catch (OperationCanceledException) { }
+        }
     }
 
     [Fact]
@@ -144,7 +154,9 @@ public sealed class ReadinessAndUpgradeTests
 
     private static async Task WaitForFileAsync(string path, Task<UpgradeResult> upgrade)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        // Cold Windows runners can spend several seconds initializing PowerShell.
+        // This only bounds fixture setup; cancellation still has its own short check.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
         while (!File.Exists(path))
         {
             if (upgrade.IsCompleted)
